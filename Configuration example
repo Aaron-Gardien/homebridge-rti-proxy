@@ -1,0 +1,8 @@
+"platforms": [
+  {
+    "platform": "RtiProxy",
+    "username": "admin",
+    "password": "admin",
+    "proxyPort": 9001
+  }
+]
