@@ -7,7 +7,7 @@
   "engines": { "homebridge": ">=1.4.0" },
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR_GITHUB/homebridge-rti-proxy.git"
+    "url": "https://github.com/aaron-gardien/homebridge-rti-proxy.git"
   },
   "author": "Your Name",
   "license": "MIT",
