@@ -2,7 +2,9 @@
   {
     "platform": "RtiProxy",
     "username": "admin",
-    "password": "rvq9kcj1ryr!ybd7CEM",
+    "password": "password",
+    "homebridgeHost": "192.168.20.103",
     "proxyPort": 9001
-  }
+    }
+}
 ]
