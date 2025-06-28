@@ -1,12 +1,23 @@
-# homebridge-rti-proxy
+# homebridge-rti-proxy (Managed External Proxy)
 
-A Homebridge plugin that provides a real-time, JSON-over-WebSocket proxy for all Homebridge accessories—so RTI, Postman, or any client can receive state updates instantly.
+This Homebridge plugin launches a proven external proxy as a background process.
+- **Plugin-style** install/configure (via Homebridge UI)
+- **Real-time push and/or polling** from Homebridge to RTI, Postman, etc.
 
 ## Usage
 
-1. Install using the Homebridge UI (from npm or locally).
-2. Configure your Homebridge username, password, and proxy port.
-3. Connect any client to `ws://<homebridge-ip>:9001`
-4. You will receive:
-   ```json
-   { "event": "accessories-data", "data": [ ... ] }
+1. Install using Homebridge UI or npm.
+2. Configure username, password, proxyPort, etc.
+3. On Homebridge start, the proxy runs as a background Node.js process.
+
+## Configuration example
+
+```json
+"platforms": [
+  {
+    "platform": "RtiProxy",
+    "username": "admin",
+    "password": "admin",
+    "proxyPort": 9001
+  }
+]
