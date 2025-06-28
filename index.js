@@ -22,6 +22,7 @@ class RtiProxyPlatform {
     this.lastAccessoriesData = null;
     this.api.on('didFinishLaunching', () => this.startProxy());
   }
+
   async getBearerToken() {
     try {
       const url = `http://${this.homebridgeHost}:${this.homebridgePort}/api/auth/login`;
@@ -41,6 +42,7 @@ class RtiProxyPlatform {
       throw err;
     }
   }
+
   async startProxy() {
     if (!io) {
       this.log('socket.io-client is missing! Did you run npm install?');
@@ -50,17 +52,30 @@ class RtiProxyPlatform {
     const wsPath = `/socket.io/?token=${this.access_token}&EIO=4&transport=websocket`;
     const homebridgeURL = `ws://${this.homebridgeHost}:${this.homebridgePort}${wsPath}`;
     const homebridge_ws = new WebSocket(homebridgeURL);
+
     homebridge_ws.on('open', () => {
       this.log('Connected to Homebridge Socket.IO');
       homebridge_ws.send('40/accessories,');
       setTimeout(() => {
         homebridge_ws.send('42/accessories,["get-accessories"]');
       }, 250);
+
+      // --- (OPTIONAL) Poll every 5s for state, uncomment if you never get push updates ---
+      /*
+      setInterval(() => {
+        if (homebridge_ws.readyState === WebSocket.OPEN) {
+          homebridge_ws.send('42/accessories,["get-accessories"]');
+        }
+      }, 5000);
+      */
     });
+
     homebridge_ws.on('message', (data) => {
       let text = (Buffer.isBuffer(data) ? data.toString() : data);
+      this.log('[HomebridgeWS]', text); // <--- LOG ALL incoming for debug
+
       if (text === '2') {
-        homebridge_ws.send('3'); // Pong
+        homebridge_ws.send('3'); // Pong for ping
         return;
       }
       if (text.startsWith('42/accessories,')) {
@@ -71,6 +86,7 @@ class RtiProxyPlatform {
           if (event === "accessories-data") {
             this.lastAccessoriesData = eventData;
           }
+          // Forward every new event to ALL clients
           const outgoing = JSON.stringify({ event, data: eventData });
           this.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) client.send(outgoing);
@@ -80,6 +96,7 @@ class RtiProxyPlatform {
         }
       }
     });
+
     homebridge_ws.on('close', () => {
       this.log('Homebridge Socket.IO closed, reconnecting in 10s...');
       setTimeout(() => this.startProxy(), 10000);
@@ -88,12 +105,15 @@ class RtiProxyPlatform {
       this.log('Homebridge WS error:', err.message);
       homebridge_ws.terminate();
     });
+
     const wss = new WebSocket.Server({ port: this.proxyPort }, () => {
       this.log(`RTI Proxy WebSocket listening on ws://localhost:${this.proxyPort}`);
     });
+
     wss.on('connection', ws => {
       this.log('RTI/Web client connected');
       this.clients.push(ws);
+      // Send the latest state immediately to new client
       if (this.lastAccessoriesData) {
         ws.send(JSON.stringify({ event: "accessories-data", data: this.lastAccessoriesData }));
       }
@@ -102,6 +122,7 @@ class RtiProxyPlatform {
         this.log('RTI/Web client disconnected');
       });
       ws.on('message', msg => {
+        // Optionally: Forward to Homebridge for control (if needed)
         if (homebridge_ws.readyState === WebSocket.OPEN) {
           homebridge_ws.send(msg);
         }
