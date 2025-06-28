@@ -11,10 +11,10 @@ class RtiProxyPlatform {
     this.config = config || {};
     this.api = api;
     this.proxyPort = this.config.proxyPort || 9001;
-    this.homebridgeHost = this.config.homebridgeHost || '127.0.0.1';
+    this.homebridgeHost = this.config.homebridgeHost || '192.168.20.103';
     this.homebridgePort = this.config.homebridgePort || 8581;
     this.username = this.config.username || 'admin';
-    this.password = this.config.password || 'admin';
+    this.password = this.config.password || 'rvq9kcj1ryr!ybd7CEM';
     this.otp = this.config.otp || '';
     this.api.on('didFinishLaunching', () => {
       this.startProxyProcess();
