@@ -42,30 +42,47 @@ class RtiProxyPlatform {
 
     // HTML table endpoint
     app.get('/accessories/table', (req, res) => {
-      if (!this.lastAccessoriesData) {
-        return res.send('<h1>No accessory data yet.</h1>');
+  if (!this.lastAccessoriesData) {
+    return res.send('<h1>No accessory data yet.</h1>');
+  }
+  // Filter out ProtocolInformation and map details
+  let rows = this.lastAccessoriesData
+    .filter(acc => acc.type !== "ProtocolInformation")
+    .map(acc => {
+      let charTypes = (acc.serviceCharacteristics || []).map(c => c.type);
+      let details = '';
+      if (charTypes.includes("Hue") && charTypes.includes("Saturation")) {
+        details = 'RGBW Light';
+      } else if (charTypes.includes("Brightness")) {
+        details = 'Dimmable Light';
+      } else if (charTypes.includes("On")) {
+        details = 'Switch';
       }
-      let rows = this.lastAccessoriesData.map(acc => `
+      return `
         <tr>
           <td>${acc.uniqueId}</td>
           <td>${acc.type}</td>
           <td>${acc.humanType || ''}</td>
           <td>${acc.serviceName}</td>
+          <td>${details}</td>
         </tr>
-      `).join('');
-      res.send(`
-        <html>
-        <head><title>Homebridge Accessories</title></head>
-        <body>
-          <h1>Discovered Accessories</h1>
-          <table border="1" cellpadding="4" cellspacing="0">
-            <tr><th>Unique ID</th><th>Type</th><th>Human Type</th><th>Name</th></tr>
-            ${rows}
-          </table>
-        </body>
-        </html>
-      `);
-    });
+      `;
+    }).join('');
+  res.send(`
+    <html>
+    <head><title>Homebridge Accessories</title></head>
+    <body>
+      <h1>Discovered Accessories</h1>
+      <table border="1" cellpadding="4" cellspacing="0">
+        <tr>
+          <th>Unique ID</th><th>Type</th><th>Human Type</th><th>Name</th><th>Details</th>
+        </tr>
+        ${rows}
+      </table>
+    </body>
+    </html>
+  `);
+});
 
     app.listen(ACCESSORY_PORT, () => {
       console.log(`Accessory list HTTP server at http://localhost:${ACCESSORY_PORT}/accessories`);
