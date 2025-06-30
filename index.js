@@ -23,6 +23,7 @@ class RtiProxyPlatform {
     this.proxyPort = this.config.proxyPort || 9001;
     this.clients = [];
     this.lastAccessoriesData = null;
+    this.accessories = [];
     this.wss = null; // Track the WebSocket server instance
 
     // Start HTTP endpoint for accessory list
@@ -43,47 +44,47 @@ class RtiProxyPlatform {
 
     // HTML table endpoint
     app.get('/accessories/table', (req, res) => {
-  if (!this.lastAccessoriesData) {
-    return res.send('<h1>No accessory data yet.</h1>');
-  }
-  // Filter out ProtocolInformation and map details
-  let rows = this.lastAccessoriesData
-    .filter(acc => acc.type !== "ProtocolInformation")
-    .map(acc => {
-      let charTypes = (acc.serviceCharacteristics || []).map(c => c.type);
-      let details = '';
-      if (charTypes.includes("Hue") && charTypes.includes("Saturation")) {
-        details = 'RGBW Light';
-      } else if (charTypes.includes("Brightness")) {
-        details = 'Dimmable Light';
-      } else if (charTypes.includes("On")) {
-        details = 'Switch';
+      if (!this.accessories || this.accessories.length === 0) {
+        return res.send('<h1>No accessory data yet.</h1>');
       }
-      return `
-        <tr>
-          <td>${acc.uniqueId}</td>
-          <td>${acc.type}</td>
-          <td>${acc.humanType || ''}</td>
-          <td>${acc.serviceName}</td>
-          <td>${details}</td>
-        </tr>
-      `;
-    }).join('');
-  res.send(`
-    <html>
-    <head><title>Homebridge Accessories</title></head>
-    <body>
-      <h1>Discovered Accessories</h1>
-      <table border="1" cellpadding="4" cellspacing="0">
-        <tr>
-          <th>Unique ID</th><th>Type</th><th>Human Type</th><th>Name</th><th>Details</th>
-        </tr>
-        ${rows}
-      </table>
-    </body>
-    </html>
-  `);
-});
+      // Filter out ProtocolInformation and map details
+      let rows = this.accessories
+        .filter(acc => acc.type !== "ProtocolInformation")
+        .map(acc => {
+          let charTypes = (acc.serviceCharacteristics || []).map(c => c.type);
+          let details = '';
+          if (charTypes.includes("Hue") && charTypes.includes("Saturation")) {
+            details = 'RGBW Light';
+          } else if (charTypes.includes("Brightness")) {
+            details = 'Dimmable Light';
+          } else if (charTypes.includes("On")) {
+            details = 'Switch';
+          }
+          return `
+            <tr>
+              <td>${acc.uniqueId}</td>
+              <td>${acc.type}</td>
+              <td>${acc.humanType || ''}</td>
+              <td>${acc.serviceName}</td>
+              <td>${details}</td>
+            </tr>
+          `;
+        }).join('');
+      res.send(`
+        <html>
+        <head><title>Homebridge Accessories</title></head>
+        <body>
+          <h1>Discovered Accessories</h1>
+          <table border="1" cellpadding="4" cellspacing="0">
+            <tr>
+              <th>Unique ID</th><th>Type</th><th>Human Type</th><th>Name</th><th>Details</th>
+            </tr>
+            ${rows}
+          </table>
+        </body>
+        </html>
+      `);
+    });
 
     app.listen(ACCESSORY_PORT, () => {
       console.log(`Accessory list HTTP server at http://localhost:${ACCESSORY_PORT}/accessories`);
@@ -152,9 +153,31 @@ class RtiProxyPlatform {
           const event = payload[0];
           const eventData = payload[1];
           if (event === "accessories-data") {
-            this.lastAccessoriesData = eventData;
+            // Merge logic: update or insert accessories, don't overwrite unless full list
+            if (this.accessories.length === 0 || eventData.length >= this.accessories.length) {
+              this.accessories = eventData;
+              this.log('Stored full accessories list, count:', this.accessories.length);
+            } else {
+              // Partial update: merge by uniqueId if present, else by aid+iid
+              for (let i = 0; i < eventData.length; i++) {
+                const newAcc = eventData[i];
+                let found = false;
+                for (let j = 0; j < this.accessories.length; j++) {
+                  const oldAcc = this.accessories[j];
+                  if ((newAcc.uniqueId && oldAcc.uniqueId && newAcc.uniqueId === oldAcc.uniqueId) ||
+                      (newAcc.aid === oldAcc.aid && newAcc.iid === oldAcc.iid)) {
+                    this.accessories[j] = newAcc;
+                    found = true;
+                    break;
+                  }
+                }
+                if (!found) this.accessories.push(newAcc);
+              }
+              this.log('Merged partial accessories-data update, total count:', this.accessories.length);
+            }
+            this.lastAccessoriesData = this.accessories;
           }
-          const outgoing = JSON.stringify({ event, data: eventData });
+          const outgoing = JSON.stringify({ event, data: this.lastAccessoriesData });
           this.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) client.send(outgoing);
           });
