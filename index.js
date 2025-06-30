@@ -187,8 +187,21 @@ class RtiProxyPlatform {
         this.log('RTI/Web client disconnected');
       });
       ws.on('message', msg => {
-        if (homebridge_ws.readyState === WebSocket.OPEN) {
-          homebridge_ws.send(msg);
+        try {
+          if (homebridge_ws.readyState === WebSocket.OPEN) {
+            // Validate message is a string and looks like a socket.io frame
+            if (typeof msg !== 'string') {
+              this.log('Received non-string message from RTI/Web client:', msg);
+              return;
+            }
+            // Optionally, add more validation here (e.g., regex for frame format)
+            this.log('Forwarding message from RTI/Web client to Homebridge:', msg);
+            homebridge_ws.send(msg);
+          } else {
+            this.log('Homebridge WebSocket not open, cannot forward message');
+          }
+        } catch (err) {
+          this.log('Error handling RTI/Web client message:', err.message, msg);
         }
       });
     });
