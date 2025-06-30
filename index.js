@@ -202,14 +202,20 @@ class RtiProxyPlatform {
         });
         ws.on('message', msg => {
           try {
-            this.log('Received from RTI/Web client:', msg);
+            let msgType = typeof msg;
+            let msgContent = msg;
+            if (Buffer.isBuffer(msg)) {
+              msgType = 'Buffer';
+              msgContent = msg.toString();
+            }
+            this.log('Received from RTI/Web client:', `[type: ${msgType}]`, msgContent);
             if (homebridge_ws.readyState === WebSocket.OPEN) {
-              if (typeof msg !== 'string') {
-                this.log('Received non-string message from RTI/Web client:', msg);
+              if (typeof msgContent !== 'string') {
+                this.log('Received non-string message from RTI/Web client:', msgContent);
                 return;
               }
-              this.log('Forwarding message from RTI/Web client to Homebridge:', msg);
-              homebridge_ws.send(msg);
+              this.log('Forwarding message from RTI/Web client to Homebridge:', msgContent);
+              homebridge_ws.send(msgContent);
             } else {
               this.log('Homebridge WebSocket not open, cannot forward message');
             }
