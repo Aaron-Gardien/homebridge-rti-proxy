@@ -2,7 +2,6 @@ const axios = require('axios');
 const WebSocket = require('ws');
 const express = require('express');
 const app = express();
-const ACCESSORY_PORT = 9100; // You can change this port if needed
 let io;
 try { io = require('socket.io-client'); } catch (e) { io = null; }
 
@@ -21,9 +20,10 @@ class RtiProxyPlatform {
     this.password = this.config.password || 'admin';
     this.otp = this.config.otp || '';
     this.proxyPort = this.config.proxyPort || 9001;
+    this.accessoryPort = this.config.accessoryPort || 9100;
     this.clients = [];
     this.lastAccessoriesData = null;
-    this.accessories = [];
+    this.accessoryList = [];
     this.wss = null; // Track the WebSocket server instance
 
     // Start HTTP endpoint for accessory list
@@ -44,11 +44,11 @@ class RtiProxyPlatform {
 
     // HTML table endpoint
     app.get('/accessories/table', (req, res) => {
-      if (!this.accessories || this.accessories.length === 0) {
+      if (!this.accessoryList || this.accessoryList.length === 0) {
         return res.send('<h1>No accessory data yet.</h1>');
       }
       // Filter out ProtocolInformation and map details
-      let rows = this.accessories
+      let rows = this.accessoryList
         .filter(acc => acc.type !== "ProtocolInformation")
         .map(acc => {
           let charTypes = (acc.serviceCharacteristics || []).map(c => c.type);
@@ -86,9 +86,9 @@ class RtiProxyPlatform {
       `);
     });
 
-    app.listen(ACCESSORY_PORT, () => {
-      console.log(`Accessory list HTTP server at http://localhost:${ACCESSORY_PORT}/accessories`);
-      console.log(`Tabular HTML: http://localhost:${ACCESSORY_PORT}/accessories/table`);
+    app.listen(this.accessoryPort, () => {
+      console.log(`Accessory list HTTP server at http://localhost:${this.accessoryPort}/accessories`);
+      console.log(`Tabular HTML: http://localhost:${this.accessoryPort}/accessories/table`);
     });
   }
 
@@ -154,28 +154,28 @@ class RtiProxyPlatform {
           const eventData = payload[1];
           if (event === "accessories-data") {
             // Merge logic: update or insert accessories, don't overwrite unless full list
-            if (this.accessories.length === 0 || eventData.length >= this.accessories.length) {
-              this.accessories = eventData;
-              this.log('Stored full accessories list, count:', this.accessories.length);
+            if (this.accessoryList.length === 0 || eventData.length >= this.accessoryList.length) {
+              this.accessoryList = eventData;
+              this.log('Stored full accessories list, count:', this.accessoryList.length);
             } else {
               // Partial update: merge by uniqueId if present, else by aid+iid
               for (let i = 0; i < eventData.length; i++) {
                 const newAcc = eventData[i];
                 let found = false;
-                for (let j = 0; j < this.accessories.length; j++) {
-                  const oldAcc = this.accessories[j];
+                for (let j = 0; j < this.accessoryList.length; j++) {
+                  const oldAcc = this.accessoryList[j];
                   if ((newAcc.uniqueId && oldAcc.uniqueId && newAcc.uniqueId === oldAcc.uniqueId) ||
                       (newAcc.aid === oldAcc.aid && newAcc.iid === oldAcc.iid)) {
-                    this.accessories[j] = newAcc;
+                    this.accessoryList[j] = newAcc;
                     found = true;
                     break;
                   }
                 }
-                if (!found) this.accessories.push(newAcc);
+                if (!found) this.accessoryList.push(newAcc);
               }
-              this.log('Merged partial accessories-data update, total count:', this.accessories.length);
+              this.log('Merged partial accessories-data update, total count:', this.accessoryList.length);
             }
-            this.lastAccessoriesData = this.accessories;
+            this.lastAccessoriesData = this.accessoryList;
           }
           const outgoing = JSON.stringify({ event, data: this.lastAccessoriesData });
           this.clients.forEach(client => {
