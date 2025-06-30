@@ -202,6 +202,7 @@ class RtiProxyPlatform {
         });
         ws.on('message', msg => {
           try {
+            this.log('Received from RTI/Web client:', msg);
             if (homebridge_ws.readyState === WebSocket.OPEN) {
               if (typeof msg !== 'string') {
                 this.log('Received non-string message from RTI/Web client:', msg);
