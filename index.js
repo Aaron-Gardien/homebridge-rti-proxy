@@ -23,6 +23,7 @@ class RtiProxyPlatform {
     this.proxyPort = this.config.proxyPort || 9001;
     this.clients = [];
     this.lastAccessoriesData = null;
+    this.wss = null; // Track the WebSocket server instance
 
     // Start HTTP endpoint for accessory list
     this.setupHttpEndpoint();
@@ -165,6 +166,17 @@ class RtiProxyPlatform {
 
     homebridge_ws.on('close', () => {
       this.log('Homebridge Socket.IO closed, reconnecting in 10s...');
+      // Clean up the WebSocket server before restarting
+      if (this.wss) {
+        try {
+          this.wss.close(() => {
+            this.log('Closed previous RTI Proxy WebSocket server.');
+          });
+        } catch (err) {
+          this.log('Error closing previous WebSocket server:', err.message);
+        }
+        this.wss = null;
+      }
       setTimeout(() => this.startProxy(), 10000);
     });
     homebridge_ws.on('error', (err) => {
@@ -172,25 +184,39 @@ class RtiProxyPlatform {
       homebridge_ws.terminate();
     });
 
-    const wss = new WebSocket.Server({ port: this.proxyPort }, () => {
-      this.log(`RTI Proxy WebSocket listening on ws://localhost:${this.proxyPort}`);
-    });
+    // Only create a new WebSocket server if one doesn't already exist
+    if (!this.wss) {
+      this.wss = new WebSocket.Server({ port: this.proxyPort }, () => {
+        this.log(`RTI Proxy WebSocket listening on ws://localhost:${this.proxyPort}`);
+      });
 
-    wss.on('connection', ws => {
-      this.log('RTI/Web client connected');
-      this.clients.push(ws);
-      if (this.lastAccessoriesData) {
-        ws.send(JSON.stringify({ event: "accessories-data", data: this.lastAccessoriesData }));
-      }
-      ws.on('close', () => {
-        this.clients = this.clients.filter(c => c !== ws);
-        this.log('RTI/Web client disconnected');
-      });
-      ws.on('message', msg => {
-        if (homebridge_ws.readyState === WebSocket.OPEN) {
-          homebridge_ws.send(msg);
+      this.wss.on('connection', ws => {
+        this.log('RTI/Web client connected');
+        this.clients.push(ws);
+        if (this.lastAccessoriesData) {
+          ws.send(JSON.stringify({ event: "accessories-data", data: this.lastAccessoriesData }));
         }
+        ws.on('close', () => {
+          this.clients = this.clients.filter(c => c !== ws);
+          this.log('RTI/Web client disconnected');
+        });
+        ws.on('message', msg => {
+          try {
+            if (homebridge_ws.readyState === WebSocket.OPEN) {
+              if (typeof msg !== 'string') {
+                this.log('Received non-string message from RTI/Web client:', msg);
+                return;
+              }
+              this.log('Forwarding message from RTI/Web client to Homebridge:', msg);
+              homebridge_ws.send(msg);
+            } else {
+              this.log('Homebridge WebSocket not open, cannot forward message');
+            }
+          } catch (err) {
+            this.log('Error handling RTI/Web client message:', err.message, msg);
+          }
+        });
       });
-    });
+    }
   }
 }
