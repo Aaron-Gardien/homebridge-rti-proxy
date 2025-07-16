@@ -799,6 +799,7 @@ class RtiProxyPlatform {
           accessory.serviceCharacteristics.forEach(char => {
             charMap.set(char.type, {
               aid: accessory.aid,
+              siid: accessory.iid, // Service instance ID
               iid: char.iid,
               format: char.format,
               perms: char.perms,
@@ -872,12 +873,12 @@ class RtiProxyPlatform {
         }
       }
       
-      // Build Homebridge Socket.IO command
-      const homebridgeCommand = `42/accessories,["set-characteristics",[{"aid":${charInfo.aid},"iid":${charInfo.iid},"value":${JSON.stringify(finalValue)}}]]`;
+      // Build Homebridge Socket.IO command using accessory-control format
+      const homebridgeCommand = `42/accessories,["accessory-control",{"set":{"uniqueId":"${uniqueId}","aid":${charInfo.aid},"siid":${charInfo.siid},"iid":${charInfo.iid},"value":${JSON.stringify(finalValue)}}}]`;
       
       this.log('Command translation details:');
       this.log('  Input:', { uniqueId: uniqueId.substring(0, 8) + '...', characteristic, value });
-      this.log('  Mapped to:', { aid: charInfo.aid, iid: charInfo.iid, finalValue });
+      this.log('  Mapped to:', { aid: charInfo.aid, siid: charInfo.siid, iid: charInfo.iid, finalValue });
       this.log('  Socket.IO command:', homebridgeCommand);
       
       return { success: true, command: homebridgeCommand };
