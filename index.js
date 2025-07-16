@@ -304,7 +304,7 @@ class RtiProxyPlatform {
       // Connection health is monitored by the health monitoring system instead
     });
 
-    this.ping.on('message', (data) => {
+    this.homebridge_ws.on('message', (data) => {
       this.updateLastMessageTime(); // Track message receipt for health monitoring
       
       let text = (Buffer.isBuffer(data) ? data.toString() : data);
