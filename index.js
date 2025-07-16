@@ -93,7 +93,7 @@ class RtiProxyPlatform {
         }).join('');
       res.send(`
         <html>
-        <head><title>Homebridge Accessories</title></head>
+        <head><title>Homebridge</title></head>
         <body>
           <h1>Discovered Accessories</h1>
           <table border="1" cellpadding="4" cellspacing="0">
