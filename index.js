@@ -25,6 +25,10 @@ class RtiProxyPlatform {
     this.lastAccessoriesData = null;
     this.accessoryList = [];
     this.wss = null; // Track the WebSocket server instance
+    this.accessoryStates = new Map(); // Track parsed accessory states for change detection
+    this.parsedAccessories = new Map(); // Cache parsed accessory data
+    this.accessoryLookup = new Map(); // uniqueId -> accessory data
+    this.characteristicLookup = new Map(); // uniqueId -> characteristics map
 
     // Start HTTP endpoint for accessory list
     this.setupHttpEndpoint();
@@ -153,34 +157,43 @@ class RtiProxyPlatform {
           const event = payload[0];
           const eventData = payload[1];
           if (event === "accessories-data") {
-            // Merge logic: update or insert accessories, don't overwrite unless full list
-            if (this.accessoryList.length === 0 || eventData.length >= this.accessoryList.length) {
-              this.accessoryList = eventData;
-              this.log('Stored full accessories list, count:', this.accessoryList.length);
-            } else {
-              // Partial update: merge by uniqueId if present, else by aid+iid
-              for (let i = 0; i < eventData.length; i++) {
-                const newAcc = eventData[i];
-                let found = false;
-                for (let j = 0; j < this.accessoryList.length; j++) {
-                  const oldAcc = this.accessoryList[j];
-                  if ((newAcc.uniqueId && oldAcc.uniqueId && newAcc.uniqueId === oldAcc.uniqueId) ||
-                      (newAcc.aid === oldAcc.aid && newAcc.iid === oldAcc.iid)) {
-                    this.accessoryList[j] = newAcc;
-                    found = true;
-                    break;
-                  }
-                }
-                if (!found) this.accessoryList.push(newAcc);
-              }
-              this.log('Merged partial accessories-data update, total count:', this.accessoryList.length);
-            }
+            // Process accessory data and detect changes
+            const { changes, allAccessories } = this.processAccessoryData(eventData);
+            
+            // Update the accessory list for the HTTP endpoint
+            this.accessoryList = eventData;
             this.lastAccessoriesData = this.accessoryList;
+            
+            // Build lookup maps for command translation
+            this.buildAccessoryLookups();
+            
+            // Send only changed data to WebSocket clients for efficiency
+            if (changes.length > 0) {
+              const changeNotifications = this.createChangeNotification(changes);
+              
+              // Send each individual characteristic update
+              changeNotifications.forEach(notification => {
+                this.sendToClients(notification);
+              });
+              
+              this.log(`Sent ${changeNotifications.length} accessory-update messages to WebSocket clients`);
+            }
+            
+            // Also send full state to any newly connected clients
+            const fullStateMessage = {
+              event: "full-state",
+              data: allAccessories,
+              timestamp: Date.now()
+            };
+            
+            // Send full state to clients that might need it (e.g., new connections)
+            this.clients.forEach(client => {
+              if (client.needsFullState) {
+                client.send(JSON.stringify(fullStateMessage));
+                client.needsFullState = false;
+              }
+            });
           }
-          const outgoing = JSON.stringify({ event, data: this.lastAccessoriesData });
-          this.clients.forEach(client => {
-            if (client.readyState === WebSocket.OPEN) client.send(outgoing);
-          });
         } catch (err) {
           this.log('Failed to parse frame:', err.message, text);
         }
@@ -215,10 +228,23 @@ class RtiProxyPlatform {
 
       this.wss.on('connection', ws => {
         this.log('RTI/Web client connected');
+        ws.needsFullState = true; // Mark new clients as needing full state
         this.clients.push(ws);
-        if (this.lastAccessoriesData) {
+        
+        // Send full state to the new client
+        if (this.parsedAccessories.size > 0) {
+          const fullStateMessage = {
+            event: "full-state",
+            data: this.getAllAccessoryStates(),
+            timestamp: Date.now()
+          };
+          ws.send(JSON.stringify(fullStateMessage));
+          ws.needsFullState = false;
+        } else if (this.lastAccessoriesData) {
+          // Fallback to old format if no parsed data yet
           ws.send(JSON.stringify({ event: "accessories-data", data: this.lastAccessoriesData }));
         }
+        
         ws.on('close', () => {
           this.clients = this.clients.filter(c => c !== ws);
           this.log('RTI/Web client disconnected');
@@ -232,21 +258,346 @@ class RtiProxyPlatform {
               msgContent = msg.toString();
             }
             this.log('Received from RTI/Web client:', `[type: ${msgType}]`, msgContent);
+            
             if (homebridge_ws.readyState === WebSocket.OPEN) {
               if (typeof msgContent !== 'string') {
                 this.log('Received non-string message from RTI/Web client:', msgContent);
                 return;
               }
-              this.log('Forwarding message from RTI/Web client to Homebridge:', msgContent);
-              homebridge_ws.send(msgContent);
+              
+              // Process user-friendly commands
+              const commandResult = this.processUserCommand(msgContent);
+              
+              if (commandResult.isUserCommand) {
+                if (commandResult.error) {
+                  // Send error response back to client
+                  ws.send(JSON.stringify({
+                    event: "command-error",
+                    error: commandResult.error
+                  }));
+                  return;
+                } else {
+                  // Send translated command to Homebridge
+                  this.log('Translated user command to Homebridge format:', commandResult.homebridgeCommand);
+                  homebridge_ws.send(commandResult.homebridgeCommand);
+                  
+                  // Send success response back to client
+                  ws.send(JSON.stringify({
+                    event: "command-success",
+                    message: "Command sent successfully"
+                  }));
+                }
+              } else {
+                // Forward original command (raw Socket.IO format)
+                this.log('Forwarding raw command from RTI/Web client to Homebridge:', msgContent);
+                homebridge_ws.send(commandResult.originalCommand);
+              }
             } else {
               this.log('Homebridge WebSocket not open, cannot forward message');
+              ws.send(JSON.stringify({
+                event: "command-error",
+                error: "Homebridge connection not available"
+              }));
             }
           } catch (err) {
             this.log('Error handling RTI/Web client message:', err.message, msg);
+            ws.send(JSON.stringify({
+              event: "command-error",
+              error: "Failed to process command: " + err.message
+            }));
           }
         });
       });
+    }
+  }
+
+  // Parse accessory data into a more efficient format
+  parseAccessory(accessory) {
+    const parsed = {
+      uniqueId: accessory.uniqueId,
+      aid: accessory.aid,
+      iid: accessory.iid,
+      type: accessory.type,
+      serviceName: accessory.serviceName,
+      humanType: accessory.humanType,
+      characteristics: {}
+    };
+
+    // Parse service characteristics
+    if (accessory.serviceCharacteristics) {
+      accessory.serviceCharacteristics.forEach(char => {
+        const key = char.type;
+        parsed.characteristics[key] = {
+          value: char.value,
+          format: char.format,
+          perms: char.perms,
+          description: char.description,
+          unit: char.unit,
+          minValue: char.minValue,
+          maxValue: char.minValue,
+          minStep: char.minStep
+        };
+      });
+    }
+
+    return parsed;
+  }
+
+  // Compare two accessory states to detect changes - return changed characteristics
+  hasStateChanged(oldState, newState) {
+    if (!oldState || !newState) return { changed: true, changedChars: newState.characteristics || {} };
+    
+    const oldChars = oldState.characteristics || {};
+    const newChars = newState.characteristics || {};
+    const changedChars = {};
+    let hasChanges = false;
+    
+    // Check for new or changed characteristics
+    for (const [key, newChar] of Object.entries(newChars)) {
+      if (!oldChars[key] || oldChars[key].value !== newChar.value) {
+        changedChars[key] = newChar;
+        hasChanges = true;
+      }
+    }
+    
+    return { changed: hasChanges, changedChars };
+  }
+
+  // Create efficient change notification - send individual characteristic updates
+  createChangeNotification(changes) {
+    const updates = [];
+    
+    for (const change of changes) {
+      // Send individual updates for each changed characteristic
+      for (const [charType, charData] of Object.entries(change.characteristics)) {
+        updates.push({
+          event: "accessory-update",
+          data: {
+            uniqueId: change.uniqueId,
+            type: change.type,
+            characteristic: charType,
+            value: charData.value
+          }
+        });
+      }
+    }
+    
+    return updates;
+  }
+
+  // Process accessory data and detect changes
+  processAccessoryData(eventData) {
+    const changes = [];
+    const allAccessories = [];
+
+    for (const accessory of eventData) {
+      const parsed = this.parseAccessory(accessory);
+      const key = parsed.uniqueId || `${parsed.aid}-${parsed.iid}`;
+      const oldState = this.accessoryStates.get(key);
+      
+      const { changed, changedChars } = this.hasStateChanged(oldState, parsed);
+      
+      if (changed) {
+        changes.push({
+          uniqueId: parsed.uniqueId,
+          aid: parsed.aid,
+          iid: parsed.iid,
+          type: parsed.type,
+          serviceName: parsed.serviceName,
+          humanType: parsed.humanType,
+          characteristics: changedChars, // Only changed characteristics
+          changeType: oldState ? 'updated' : 'added'
+        });
+        
+        this.accessoryStates.set(key, parsed);
+        this.parsedAccessories.set(key, parsed);
+      }
+      
+      allAccessories.push(parsed);
+    }
+
+    return { changes, allAccessories };
+  }
+
+  // Send efficient updates to WebSocket clients
+  sendToClients(message) {
+    const jsonMessage = JSON.stringify(message);
+    this.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(jsonMessage);
+      }
+    });
+  }
+
+  // Get all current accessory states in efficient format
+  getAllAccessoryStates() {
+    return Array.from(this.parsedAccessories.values());
+  }
+
+  // Build lookup maps for aid/iid translation
+  buildAccessoryLookups() {
+    this.accessoryLookup = new Map(); // uniqueId -> accessory data
+    this.characteristicLookup = new Map(); // uniqueId -> characteristics map
+    
+    for (const accessory of this.accessoryList) {
+      if (accessory.uniqueId) {
+        this.accessoryLookup.set(accessory.uniqueId, accessory);
+        
+        const charMap = new Map();
+        if (accessory.serviceCharacteristics) {
+          accessory.serviceCharacteristics.forEach(char => {
+            charMap.set(char.type, {
+              aid: accessory.aid,
+              iid: char.iid,
+              format: char.format,
+              perms: char.perms,
+              minValue: char.minValue,
+              maxValue: char.maxValue,
+              minStep: char.minStep
+            });
+          });
+        }
+        this.characteristicLookup.set(accessory.uniqueId, charMap);
+      }
+    }
+  }
+
+  // Translate user-friendly command to Homebridge Socket.IO format
+  translateCommand(command) {
+    try {
+      const { uniqueId, characteristic, value } = command;
+      
+      if (!uniqueId || !characteristic || value === undefined) {
+        throw new Error('Command must include uniqueId, characteristic, and value');
+      }
+      
+      const charMap = this.characteristicLookup.get(uniqueId);
+      if (!charMap) {
+        throw new Error(`Accessory with uniqueId '${uniqueId}' not found`);
+      }
+      
+      const charInfo = charMap.get(characteristic);
+      if (!charInfo) {
+        throw new Error(`Characteristic '${characteristic}' not found for accessory '${uniqueId}'`);
+      }
+      
+      // Check if characteristic is writable
+      if (!charInfo.perms || !charInfo.perms.includes('pw')) {
+        throw new Error(`Characteristic '${characteristic}' is not writable`);
+      }
+      
+      // Validate value based on format and constraints
+      let finalValue = value;
+      if (charInfo.format === 'bool') {
+        finalValue = Boolean(value);
+      } else if (charInfo.format === 'int' || charInfo.format === 'uint8' || charInfo.format === 'uint16' || charInfo.format === 'uint32') {
+        finalValue = parseInt(value);
+        if (charInfo.minValue !== undefined && finalValue < charInfo.minValue) {
+          finalValue = charInfo.minValue;
+        }
+        if (charInfo.maxValue !== undefined && finalValue > charInfo.maxValue) {
+          finalValue = charInfo.maxValue;
+        }
+      } else if (charInfo.format === 'float') {
+        finalValue = parseFloat(value);
+        if (charInfo.minValue !== undefined && finalValue < charInfo.minValue) {
+          finalValue = charInfo.minValue;
+        }
+        if (charInfo.maxValue !== undefined && finalValue > charInfo.maxValue) {
+          finalValue = charInfo.maxValue;
+        }
+      }
+      
+      // Build Homebridge Socket.IO command
+      const homebridgeCommand = `42/accessories,["set-characteristics",[{"aid":${charInfo.aid},"iid":${charInfo.iid},"value":${JSON.stringify(finalValue)}}]]`;
+      
+      return { success: true, command: homebridgeCommand };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Handle toggle commands by reading current state and inverting it
+  async handleToggleCommand(command) {
+    try {
+      const { uniqueId, characteristic } = command;
+      
+      if (!uniqueId || !characteristic) {
+        throw new Error('Toggle command must include uniqueId and characteristic');
+      }
+      
+      // Find the current accessory state
+      const currentAccessory = this.parsedAccessories.get(uniqueId);
+      if (!currentAccessory) {
+        throw new Error(`Accessory with uniqueId '${uniqueId}' not found`);
+      }
+      
+      // Get current characteristic value
+      const currentChar = currentAccessory.characteristics[characteristic];
+      if (!currentChar) {
+        throw new Error(`Characteristic '${characteristic}' not found for accessory '${uniqueId}'`);
+      }
+      
+      // Calculate toggle value based on characteristic type
+      let toggleValue;
+      if (currentChar.format === 'bool') {
+        toggleValue = !currentChar.value;
+      } else if (characteristic === 'On' || characteristic === 'Brightness') {
+        // For On/Off or Brightness, toggle between 0 and previous non-zero value or 100
+        if (currentChar.value > 0) {
+          toggleValue = 0;
+        } else {
+          toggleValue = characteristic === 'On' ? 1 : 100;
+        }
+      } else {
+        throw new Error(`Toggle not supported for characteristic '${characteristic}'`);
+      }
+      
+      // Create a set-characteristic command with the toggle value
+      const setCommand = {
+        uniqueId: uniqueId,
+        characteristic: characteristic,
+        value: toggleValue
+      };
+      
+      // Use existing translateCommand function
+      return this.translateCommand(setCommand);
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Process user-friendly commands
+  processUserCommand(msgContent) {
+    try {
+      const command = JSON.parse(msgContent);
+      
+      // Check if this is a user-friendly command
+      if (command.command === 'set-characteristic') {
+        const translation = this.translateCommand(command);
+        if (translation.success) {
+          return { isUserCommand: true, homebridgeCommand: translation.command };
+        } else {
+          this.log('Command translation failed:', translation.error);
+          return { isUserCommand: true, error: translation.error };
+        }
+      }
+      // Handle toggle commands
+      else if (command.command === 'toggle-characteristic') {
+        const translation = this.handleToggleCommand(command);
+        if (translation.success) {
+          return { isUserCommand: true, homebridgeCommand: translation.command };
+        } else {
+          this.log('Toggle command translation failed:', translation.error);
+          return { isUserCommand: true, error: translation.error };
+        }
+      }
+      
+      // Not a user command, pass through as-is
+      return { isUserCommand: false, originalCommand: msgContent };
+    } catch (e) {
+      // Not JSON or not a user command, pass through as-is
+      return { isUserCommand: false, originalCommand: msgContent };
     }
   }
 }
