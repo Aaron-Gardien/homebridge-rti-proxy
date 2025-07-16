@@ -59,12 +59,14 @@ class RtiProxyPlatform {
         status: this.homebridgeConnected ? 'connected' : 'disconnected',
         accessoryCount: this.accessoryList.length,
         websocketClients: this.clients.length,
+        lookupSize: this.characteristicLookup.size,
+        lastMessageTime: this.lastMessageTime ? new Date(this.lastMessageTime).toISOString() : null,
         timestamp: new Date().toISOString()
       });
     });
 
     // Test command endpoint
-    app.post('/test-command', (req, res) => {
+    app.post('/test-command', async (req, res) => {
       if (!this.homebridgeConnected) {
         return res.status(503).json({ error: 'Homebridge not connected' });
       }
@@ -79,16 +81,103 @@ class RtiProxyPlatform {
       
       this.log('Test command triggered via HTTP:', testCommand);
       
-      // Simulate RTI client sending command
-      const testMessage = JSON.stringify(testCommand);
-      this.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-          this.log('Sending test command to RTI client');
-          client.send(testMessage);
+      try {
+        // Process the command directly instead of sending to RTI client
+        const commandResult = await this.processUserCommand(JSON.stringify(testCommand));
+        
+        if (commandResult.isUserCommand) {
+          if (commandResult.error) {
+            return res.status(400).json({ error: commandResult.error });
+          } else {
+            // Send translated command to Homebridge
+            this.log('[Socket.IO Send] Test Command:', commandResult.homebridgeCommand);
+            this.homebridge_ws.send(commandResult.homebridgeCommand);
+            
+            return res.json({ 
+              message: 'Test command sent successfully',
+              command: testCommand,
+              homebridgeCommand: commandResult.homebridgeCommand
+            });
+          }
+        } else {
+          return res.status(400).json({ error: 'Command was not recognized as user command' });
         }
-      });
+      } catch (error) {
+        this.log('Test command error:', error.message);
+        return res.status(500).json({ error: 'Test command failed: ' + error.message });
+      }
+    });
+
+    // Test toggle command endpoint
+    app.post('/test-toggle', async (req, res) => {
+      if (!this.homebridgeConnected) {
+        return res.status(503).json({ error: 'Homebridge not connected' });
+      }
       
-      res.json({ message: 'Test command sent', command: testCommand });
+      // Test toggle command for Bug Zapper
+      const testCommand = {
+        command: 'toggle-characteristic',
+        uniqueId: '4e50d2d83cef318a2fc6ef49f743a5946af5c641b5804c5070f6390ae8a0d0a9',
+        characteristic: 'On'
+      };
+      
+      this.log('Test toggle command triggered via HTTP:', testCommand);
+      
+      try {
+        // Process the command directly
+        const commandResult = await this.processUserCommand(JSON.stringify(testCommand));
+        
+        if (commandResult.isUserCommand) {
+          if (commandResult.error) {
+            return res.status(400).json({ error: commandResult.error });
+          } else {
+            // Send translated command to Homebridge
+            this.log('[Socket.IO Send] Test Toggle Command:', commandResult.homebridgeCommand);
+            this.homebridge_ws.send(commandResult.homebridgeCommand);
+            
+            return res.json({ 
+              message: 'Test toggle command sent successfully',
+              command: testCommand,
+              homebridgeCommand: commandResult.homebridgeCommand
+            });
+          }
+        } else {
+          return res.status(400).json({ error: 'Command was not recognized as user command' });
+        }
+      } catch (error) {
+        this.log('Test toggle command error:', error.message);
+        return res.status(500).json({ error: 'Test toggle command failed: ' + error.message });
+      }
+    });
+
+    // Debug endpoint to list all accessories and their characteristics
+    app.get('/debug/accessories', (req, res) => {
+      if (!this.accessoryList || this.accessoryList.length === 0) {
+        return res.json({ error: 'No accessories available' });
+      }
+      
+      const debugInfo = this.accessoryList
+        .filter(acc => acc.type !== "ProtocolInformation")
+        .map(acc => ({
+          uniqueId: acc.uniqueId,
+          aid: acc.aid,
+          type: acc.type,
+          serviceName: acc.serviceName,
+          characteristics: (acc.serviceCharacteristics || []).map(char => ({
+            type: char.type,
+            iid: char.iid,
+            value: char.value,
+            format: char.format,
+            perms: char.perms,
+            writable: char.perms ? char.perms.includes('pw') : false
+          }))
+        }));
+      
+      res.json({ 
+        count: debugInfo.length,
+        accessories: debugInfo,
+        lookupSize: this.characteristicLookup.size
+      });
     });
 
     // HTML table endpoint
@@ -263,6 +352,22 @@ class RtiProxyPlatform {
           const payload = JSON.parse(text.slice('42/accessories,'.length));
           const event = payload[0];
           const eventData = payload[1];
+          
+          // Handle set-characteristics response
+          if (event === "set-characteristics-response") {
+            this.log('Received set-characteristics response:', payload);
+            if (eventData && eventData.length > 0) {
+              eventData.forEach(response => {
+                if (response.status === 0) {
+                  this.log('Command executed successfully for aid:', response.aid, 'iid:', response.iid);
+                } else {
+                  this.log('Command failed for aid:', response.aid, 'iid:', response.iid, 'status:', response.status);
+                }
+              });
+            }
+            return;
+          }
+          
           if (event === "accessories-data") {
             // Handle initial full data load vs incremental updates
             if (eventData.length === 0) {
