@@ -29,6 +29,7 @@ class RtiProxyPlatform {
     this.parsedAccessories = new Map(); // Cache parsed accessory data
     this.accessoryLookup = new Map(); // uniqueId -> accessory data
     this.characteristicLookup = new Map(); // uniqueId -> characteristics map
+    this.homebridgeConnected = false; // Track connection state
 
     // Start HTTP endpoint for accessory list
     this.setupHttpEndpoint();
@@ -44,6 +45,16 @@ class RtiProxyPlatform {
       } else {
         res.status(503).json({ error: "No accessory data yet. Please try again shortly." });
       }
+    });
+
+    // Health check endpoint
+    app.get('/health', (req, res) => {
+      res.json({
+        status: this.homebridgeConnected ? 'connected' : 'disconnected',
+        accessoryCount: this.accessoryList.length,
+        websocketClients: this.clients.length,
+        timestamp: new Date().toISOString()
+      });
     });
 
     // HTML table endpoint
@@ -92,6 +103,7 @@ class RtiProxyPlatform {
 
     app.listen(this.accessoryPort, () => {
       console.log(`Accessory list HTTP server at http://localhost:${this.accessoryPort}/accessories`);
+      console.log(`Health check endpoint: http://localhost:${this.accessoryPort}/health`);
       console.log(`Tabular HTML: http://localhost:${this.accessoryPort}/accessories/table`);
     });
   }
@@ -128,19 +140,23 @@ class RtiProxyPlatform {
 
     homebridge_ws.on('open', () => {
       this.log('Connected to Homebridge Socket.IO');
+      this.homebridgeConnected = true;
       homebridge_ws.send('40/accessories,');
       setTimeout(() => {
-        homebridge_ws.send('42/accessories,["get-accessories"]');
-      }, 250);
-
-      // --- (OPTIONAL) Poll every 5s for state, uncomment if you never get push updates ---
-      /*
-      setInterval(() => {
         if (homebridge_ws.readyState === WebSocket.OPEN) {
           homebridge_ws.send('42/accessories,["get-accessories"]');
         }
-      }, 5000);
-      */
+      }, 250);
+
+      // Periodic connection check and keep-alive
+      const keepAliveInterval = setInterval(() => {
+        if (homebridge_ws.readyState === WebSocket.OPEN) {
+          // Request accessories periodically to keep connection alive and detect changes
+          homebridge_ws.send('42/accessories,["get-accessories"]');
+        } else {
+          clearInterval(keepAliveInterval);
+        }
+      }, 30000); // Every 30 seconds
     });
 
     homebridge_ws.on('message', (data) => {
@@ -149,6 +165,11 @@ class RtiProxyPlatform {
 
       if (text === '2') {
         homebridge_ws.send('3');
+        return;
+      }
+      if (text === '40') {
+        // Acknowledge connection to accessories namespace
+        homebridge_ws.send('40/accessories,');
         return;
       }
       if (text.startsWith('42/accessories,')) {
@@ -202,6 +223,7 @@ class RtiProxyPlatform {
 
     homebridge_ws.on('close', () => {
       this.log('Homebridge Socket.IO closed, reconnecting in 10s...');
+      this.homebridgeConnected = false;
       // Clean up the WebSocket server before restarting
       if (this.wss) {
         try {
@@ -217,6 +239,7 @@ class RtiProxyPlatform {
     });
     homebridge_ws.on('error', (err) => {
       this.log('Homebridge WS error:', err.message);
+      this.homebridgeConnected = false;
       homebridge_ws.terminate();
     });
 
@@ -277,6 +300,19 @@ class RtiProxyPlatform {
                   }));
                   return;
                 } else {
+                  // Check WebSocket state before sending
+                  if (homebridge_ws.readyState !== WebSocket.OPEN) {
+                    this.log('Homebridge WebSocket not open (state:', homebridge_ws.readyState, '), attempting to reconnect...');
+                    ws.send(JSON.stringify({
+                      event: "command-error",
+                      error: "Homebridge connection not available, please try again"
+                    }));
+                    
+                    // Try to reconnect
+                    setTimeout(() => this.startProxy(), 1000);
+                    return;
+                  }
+                  
                   // Send translated command to Homebridge
                   this.log('Translated user command to Homebridge format:', commandResult.homebridgeCommand);
                   homebridge_ws.send(commandResult.homebridgeCommand);
@@ -288,6 +324,12 @@ class RtiProxyPlatform {
                   }));
                 }
               } else {
+                // Check WebSocket state before forwarding
+                if (homebridge_ws.readyState !== WebSocket.OPEN) {
+                  this.log('Homebridge WebSocket not open (state:', homebridge_ws.readyState, '), cannot forward raw command');
+                  return;
+                }
+                
                 // Forward original command (raw Socket.IO format)
                 this.log('Forwarding raw command from RTI/Web client to Homebridge:', msgContent);
                 homebridge_ws.send(commandResult.originalCommand);
