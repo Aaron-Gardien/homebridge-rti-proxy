@@ -63,6 +63,34 @@ class RtiProxyPlatform {
       });
     });
 
+    // Test command endpoint
+    app.post('/test-command', (req, res) => {
+      if (!this.homebridgeConnected) {
+        return res.status(503).json({ error: 'Homebridge not connected' });
+      }
+      
+      // Test command for Bug Zapper (uniqueId from logs)
+      const testCommand = {
+        command: 'set-characteristic',
+        uniqueId: '4e50d2d83cef318a2fc6ef49f743a5946af5c641b5804c5070f6390ae8a0d0a9',
+        characteristic: 'On',
+        value: true
+      };
+      
+      this.log('Test command triggered via HTTP:', testCommand);
+      
+      // Simulate RTI client sending command
+      const testMessage = JSON.stringify(testCommand);
+      this.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+          this.log('Sending test command to RTI client');
+          client.send(testMessage);
+        }
+      });
+      
+      res.json({ message: 'Test command sent', command: testCommand });
+    });
+
     // HTML table endpoint
     app.get('/accessories/table', (req, res) => {
       if (!this.accessoryList || this.accessoryList.length === 0) {
@@ -254,6 +282,7 @@ class RtiProxyPlatform {
               const dataString = JSON.stringify(eventData);
               if (this.lastAccessoriesDataString === dataString) {
                 // Data hasn't changed, skip processing
+                this.log('Skipping duplicate accessories data processing');
                 return;
               }
               this.lastAccessoriesDataString = dataString;
@@ -675,6 +704,15 @@ class RtiProxyPlatform {
           });
         }
         this.characteristicLookup.set(accessory.uniqueId, charMap);
+        
+        // Debug log for Bug Zapper specifically
+        if (accessory.serviceName === 'Bug Zapper') {
+          this.log('Bug Zapper lookup built:', {
+            uniqueId: accessory.uniqueId,
+            aid: accessory.aid,
+            characteristics: Array.from(charMap.keys())
+          });
+        }
       }
     }
     
@@ -797,9 +835,11 @@ class RtiProxyPlatform {
   async processUserCommand(msgContent) {
     try {
       const command = JSON.parse(msgContent);
+      this.log('Processing command:', command);
       
       // Check if this is a user-friendly command
       if (command.command === 'set-characteristic') {
+        this.log('Attempting to translate set-characteristic command');
         const translation = this.translateCommand(command);
         if (translation.success) {
           this.log('Command translated successfully:', command.uniqueId?.substring(0, 8) + '...', command.characteristic, '=', command.value);
@@ -811,6 +851,7 @@ class RtiProxyPlatform {
       }
       // Handle toggle commands
       else if (command.command === 'toggle-characteristic') {
+        this.log('Attempting to translate toggle-characteristic command');
         const translation = await this.handleToggleCommand(command);
         if (translation.success) {
           this.log('Toggle command translated successfully:', command.uniqueId?.substring(0, 8) + '...', command.characteristic);
@@ -822,9 +863,11 @@ class RtiProxyPlatform {
       }
       
       // Not a user command, pass through as-is
+      this.log('Not a user command, passing through as-is');
       return { isUserCommand: false, originalCommand: msgContent };
     } catch (e) {
       // Not JSON or not a user command, pass through as-is
+      this.log('Failed to parse as JSON, passing through as-is:', e.message);
       return { isUserCommand: false, originalCommand: msgContent };
     }
   }
@@ -846,27 +889,17 @@ class RtiProxyPlatform {
         return;
       }
       
-      // Check for message timeout
-      if (this.lastMessageTime && (now - this.lastMessageTime) > 180000) { // 3 minutes
-        this.log('Health check: No messages for 3 minutes, forcing reconnection');
+      // Check for message timeout - extended to 10 minutes
+      if (this.lastMessageTime && (now - this.lastMessageTime) > 600000) { // 10 minutes
+        this.log('Health check: No messages for 10 minutes, forcing reconnection');
         this.homebridgeConnected = false;
         this.homebridge_ws.terminate();
         return;
       }
       
-      // Validate connection is actually working
-      if (this.homebridgeConnected && this.homebridge_ws.readyState === WebSocket.OPEN) {
-        try {
-          // Send a ping to verify connection
-          this.log('[Socket.IO Send] 2 (health check ping)');
-          this.homebridge_ws.send('2');
-        } catch (err) {
-          this.log('Health check: Failed to send ping, connection may be dead');
-          this.homebridgeConnected = false;
-          this.triggerReconnection();
-        }
-      }
-    }, 60000); // Check every minute
+      // Don't send health check pings - they're causing disconnections
+      // The regular keep-alive pings every 2 minutes are sufficient
+    }, 300000); // Check every 5 minutes instead of 1 minute
   }
 
   // Track last message time
