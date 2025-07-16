@@ -31,6 +31,8 @@ class RtiProxyPlatform {
     this.characteristicLookup = new Map(); // uniqueId -> characteristics map
     this.homebridgeConnected = false; // Track connection state
     this.lastMessageTime = null; // Track the time of the last message from Homebridge
+    this.isReconnecting = false; // Track reconnection state to prevent loops
+    this.isReconnecting = false; // Prevent multiple concurrent reconnection attempts
 
     // Start HTTP endpoint for accessory list
     this.setupHttpEndpoint();
@@ -161,6 +163,9 @@ class RtiProxyPlatform {
       this.updateLastMessageTime();
       this.startConnectionHealthMonitoring(); // Start health monitoring
       
+      // Notify all RTI clients of connection status
+      this.broadcastConnectionStatus();
+      
       this.homebridge_ws.send('40/accessories,');
       
       // Initial accessories request
@@ -182,9 +187,6 @@ class RtiProxyPlatform {
           }
         }
       }, 120000); // Every 2 minutes instead of 30 seconds
-
-      // Start connection health monitoring
-      this.startConnectionHealthMonitoring();
     });
 
     this.homebridge_ws.on('message', (data) => {
@@ -215,32 +217,65 @@ class RtiProxyPlatform {
           const event = payload[0];
           const eventData = payload[1];
           if (event === "accessories-data") {
-            // Process accessory data and detect changes
-            const { changes, allAccessories } = this.processAccessoryData(eventData);
+            // Handle initial full data load vs incremental updates
+            if (eventData.length === 0) {
+              // Empty update - no changes needed
+              return;
+            }
             
-            // Update the accessory list for the HTTP endpoint
-            this.accessoryList = eventData;
-            this.lastAccessoriesData = this.accessoryList;
+            // Check if this is a full data load or incremental update
+            const isFullDataLoad = eventData.length > 5 || this.accessoryList.length === 0;
             
-            // Build lookup maps for command translation
-            this.buildAccessoryLookups();
-            
-            // Send only changed data to WebSocket clients for efficiency
-            if (changes.length > 0) {
-              const changeNotifications = this.createChangeNotification(changes);
+            if (isFullDataLoad) {
+              // Full data load - update everything but don't send incremental updates
+              this.log('Stored full accessories list, count:', eventData.length);
+              this.accessoryList = eventData;
+              this.lastAccessoriesData = this.accessoryList;
               
-              // Send each individual characteristic update
-              changeNotifications.forEach(notification => {
-                this.sendToClients(notification);
+              // Parse all accessories for future change detection
+              for (const accessory of eventData) {
+                const parsed = this.parseAccessory(accessory);
+                const key = parsed.uniqueId || `${parsed.aid}-${parsed.iid}`;
+                this.accessoryStates.set(key, parsed);
+                this.parsedAccessories.set(key, parsed);
+              }
+              
+              // Build lookup maps for command translation
+              this.buildAccessoryLookups();
+              
+              // Send legacy format to RTI clients for compatibility
+              this.sendToClients({
+                event: "accessories-data",
+                data: this.accessoryList
               });
               
-              this.log(`Sent ${changeNotifications.length} accessory-update messages to WebSocket clients`);
+            } else {
+              // Incremental update - detect changes and send efficient updates
+              const { changes, allAccessories } = this.processAccessoryData(eventData);
+              
+              // Update the accessory list for the HTTP endpoint
+              this.mergeAccessoryData(eventData);
+              
+              // Build lookup maps for command translation
+              this.buildAccessoryLookups();
+              
+              // Send only changed data to WebSocket clients for efficiency
+              if (changes.length > 0) {
+                const changeNotifications = this.createChangeNotification(changes);
+                
+                // Send each individual characteristic update
+                changeNotifications.forEach(notification => {
+                  this.sendToClients(notification);
+                });
+                
+                this.log(`Sent ${changeNotifications.length} accessory-update messages to WebSocket clients`);
+              }
             }
             
             // Also send full state to any newly connected clients
             const fullStateMessage = {
               event: "full-state",
-              data: allAccessories,
+              data: this.getAllAccessoryStates(),
               timestamp: Date.now()
             };
             
@@ -261,6 +296,10 @@ class RtiProxyPlatform {
     this.homebridge_ws.on('close', () => {
       this.log('Homebridge Socket.IO closed, reconnecting in 10s...');
       this.homebridgeConnected = false;
+      
+      // Notify all RTI clients of connection status
+      this.broadcastConnectionStatus();
+      
       // Clean up intervals
       if (this.keepAliveInterval) {
         clearInterval(this.keepAliveInterval);
@@ -278,8 +317,20 @@ class RtiProxyPlatform {
     this.homebridge_ws.on('error', (err) => {
       this.log('Homebridge WS error:', err.message);
       this.homebridgeConnected = false;
+      
+      // Clean up connection and trigger reconnection
       if (this.homebridge_ws) {
-        this.homebridge_ws.terminate();
+        try {
+          this.homebridge_ws.terminate();
+        } catch (e) {
+          // Ignore termination errors
+        }
+        this.homebridge_ws = null;
+      }
+      
+      // Trigger reconnection if not already reconnecting
+      if (!this.isReconnecting) {
+        this.triggerReconnection();
       }
     });
 
@@ -307,6 +358,13 @@ class RtiProxyPlatform {
           // Fallback to old format if no parsed data yet
           ws.send(JSON.stringify({ event: "accessories-data", data: this.lastAccessoriesData }));
         }
+        
+        // Send connection status to client
+        ws.send(JSON.stringify({
+          event: "connection-status",
+          connected: this.homebridgeConnected,
+          timestamp: Date.now()
+        }));
         
         ws.on('close', () => {
           this.clients = this.clients.filter(c => c !== ws);
@@ -341,10 +399,14 @@ class RtiProxyPlatform {
               } else {
                 // Check connection state before sending
                 if (!this.homebridgeConnected || !this.homebridge_ws || this.homebridge_ws.readyState !== WebSocket.OPEN) {
-                  this.log('Homebridge WebSocket not ready, cannot send command');
+                  this.log('Homebridge WebSocket not ready, cannot send command. Triggering reconnection...');
+                  
+                  // Trigger immediate reconnection attempt
+                  this.triggerReconnection();
+                  
                   ws.send(JSON.stringify({
                     event: "command-error",
-                    error: "Homebridge connection not available, please try again"
+                    error: "Homebridge connection not available, reconnecting..."
                   }));
                   return;
                 }
@@ -362,10 +424,14 @@ class RtiProxyPlatform {
             } else {
               // Check connection state before forwarding
               if (!this.homebridgeConnected || !this.homebridge_ws || this.homebridge_ws.readyState !== WebSocket.OPEN) {
-                this.log('Homebridge WebSocket not ready, cannot forward raw command');
+                this.log('Homebridge WebSocket not ready, cannot forward raw command. Triggering reconnection...');
+                
+                // Trigger immediate reconnection attempt
+                this.triggerReconnection();
+                
                 ws.send(JSON.stringify({
                   event: "command-error",
-                  error: "Homebridge connection not available"
+                  error: "Homebridge connection not available, reconnecting..."
                 }));
                 return;
               }
@@ -514,6 +580,26 @@ class RtiProxyPlatform {
     }
 
     return { changes, allAccessories };
+  }
+
+  // Merge incremental accessory data updates
+  mergeAccessoryData(eventData) {
+    for (const newAcc of eventData) {
+      let found = false;
+      for (let i = 0; i < this.accessoryList.length; i++) {
+        const oldAcc = this.accessoryList[i];
+        if ((newAcc.uniqueId && oldAcc.uniqueId && newAcc.uniqueId === oldAcc.uniqueId) ||
+            (newAcc.aid === oldAcc.aid && newAcc.iid === oldAcc.iid)) {
+          this.accessoryList[i] = newAcc;
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        this.accessoryList.push(newAcc);
+      }
+    }
+    this.lastAccessoriesData = this.accessoryList;
   }
 
   // Send efficient updates to WebSocket clients
@@ -705,12 +791,33 @@ class RtiProxyPlatform {
     }
     
     this.healthMonitorInterval = setInterval(() => {
-      if (this.homebridge_ws && this.homebridge_ws.readyState === WebSocket.OPEN) {
-        // Check if we've received any data recently
-        const now = Date.now();
-        if (this.lastMessageTime && (now - this.lastMessageTime) > 180000) { // 3 minutes
-          this.log('No messages from Homebridge for 3 minutes, forcing reconnect');
-          this.homebridge_ws.terminate();
+      const now = Date.now();
+      
+      // Check WebSocket connection state
+      if (!this.homebridge_ws || this.homebridge_ws.readyState !== WebSocket.OPEN) {
+        this.log('Health check: WebSocket not open, triggering reconnection');
+        this.homebridgeConnected = false;
+        this.triggerReconnection();
+        return;
+      }
+      
+      // Check for message timeout
+      if (this.lastMessageTime && (now - this.lastMessageTime) > 180000) { // 3 minutes
+        this.log('Health check: No messages for 3 minutes, forcing reconnection');
+        this.homebridgeConnected = false;
+        this.homebridge_ws.terminate();
+        return;
+      }
+      
+      // Validate connection is actually working
+      if (this.homebridgeConnected && this.homebridge_ws.readyState === WebSocket.OPEN) {
+        try {
+          // Send a ping to verify connection
+          this.homebridge_ws.send('2');
+        } catch (err) {
+          this.log('Health check: Failed to send ping, connection may be dead');
+          this.homebridgeConnected = false;
+          this.triggerReconnection();
         }
       }
     }, 60000); // Check every minute
@@ -719,5 +826,38 @@ class RtiProxyPlatform {
   // Track last message time
   updateLastMessageTime() {
     this.lastMessageTime = Date.now();
+  }
+
+  // Trigger immediate reconnection attempt
+  triggerReconnection() {
+    if (this.isReconnecting) {
+      return; // Already reconnecting
+    }
+    
+    this.isReconnecting = true;
+    this.log('Triggering immediate reconnection due to connection failure');
+    
+    // Clear any existing timeouts
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+    
+    // Attempt reconnection immediately
+    setTimeout(() => {
+      this.isReconnecting = false;
+      this.startProxy();
+    }, 1000); // 1 second delay to avoid rapid reconnection loops
+  }
+
+  // Broadcast connection status to all RTI clients
+  broadcastConnectionStatus() {
+    const statusMessage = {
+      event: "connection-status",
+      connected: this.homebridgeConnected,
+      timestamp: Date.now()
+    };
+    
+    this.sendToClients(statusMessage);
   }
 }
