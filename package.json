@@ -1,0 +1,19 @@
+{
+  "name": "homebridge-rti-proxy",
+  "version": "1.0.1",
+  "description": "A Homebridge plugin that relays accessories-data as JSON to RTI and other websocket clients.",
+  "main": "index.js",
+  "keywords": ["homebridge-plugin", "rti", "websocket", "homebridge"],
+  "engines": { "homebridge": ">=1.4.0" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aaron-gardien/homebridge-rti-proxy.git"
+  },
+  "author": "Aaron Gardien",
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.0.0",
+    "axios": "^1.0.0",
+    "socket.io-client": "^4.0.0"
+  }
+}

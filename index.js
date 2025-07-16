@@ -1,7 +1,6 @@
 const axios = require('axios');
 const WebSocket = require('ws');
 const express = require('express');
-const app = express();
 let io;
 try { io = require('socket.io-client'); } catch (e) { io = null; }
 
@@ -33,6 +32,7 @@ class RtiProxyPlatform {
     this.lastMessageTime = null; // Track the time of the last message from Homebridge
     this.isReconnecting = false; // Track reconnection state to prevent loops
     this.isReconnecting = false; // Prevent multiple concurrent reconnection attempts
+    this.httpServer = null; // Track the HTTP server instance
 
     // Start HTTP endpoint for accessory list
     this.setupHttpEndpoint();
@@ -41,6 +41,9 @@ class RtiProxyPlatform {
   }
 
   setupHttpEndpoint() {
+    // Create a new Express app instance for this platform
+    const app = express();
+    
     // JSON endpoint
     app.get('/accessories', (req, res) => {
       if (this.lastAccessoriesData) {
@@ -104,7 +107,8 @@ class RtiProxyPlatform {
       `);
     });
 
-    app.listen(this.accessoryPort, () => {
+    // Start the HTTP server and store reference
+    this.httpServer = app.listen(this.accessoryPort, () => {
       console.log(`Accessory list HTTP server at http://localhost:${this.accessoryPort}/accessories`);
       console.log(`Health check endpoint: http://localhost:${this.accessoryPort}/health`);
       console.log(`Tabular HTML: http://localhost:${this.accessoryPort}/accessories/table`);

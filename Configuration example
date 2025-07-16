@@ -1,10 +1,11 @@
-"platforms": [
-  {
-    "platform": "RtiProxy",
-    "username": "admin",
-    "password": "password",
-    "homebridgeHost": "192.168.20.103",
-    "proxyPort": 9001
+{
+  "platforms": [
+    {
+      "platform": "RtiProxy",
+      "username": "admin",
+      "password": "password",
+      "homebridgeHost": "192.168.20.103",
+      "proxyPort": 9001
     }
+  ]
 }
-]
