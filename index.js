@@ -276,9 +276,6 @@ class RtiProxyPlatform {
     this.homebridge_ws = new WebSocket(homebridgeURL);
 
     // Clear any existing intervals
-    if (this.keepAliveInterval) {
-      clearInterval(this.keepAliveInterval);
-    }
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
     }
@@ -303,22 +300,11 @@ class RtiProxyPlatform {
         }
       }, 250);
 
-      // Reduced frequency keep-alive - lightweight ping only
-      this.keepAliveInterval = setInterval(() => {
-        if (this.homebridge_ws && this.homebridge_ws.readyState === WebSocket.OPEN) {
-          // Send lightweight ping instead of full accessories request
-          this.log('[Socket.IO Send] 2 (ping)');
-          this.homebridge_ws.send('2'); // Socket.IO ping
-        } else {
-          if (this.keepAliveInterval) {
-            clearInterval(this.keepAliveInterval);
-            this.keepAliveInterval = null;
-          }
-        }
-      }, 120000); // Every 2 minutes
+      // Remove keep-alive pings - they cause disconnections
+      // Connection health is monitored by the health monitoring system instead
     });
 
-    this.homebridge_ws.on('message', (data) => {
+    this.ping.on('message', (data) => {
       this.updateLastMessageTime(); // Track message receipt for health monitoring
       
       let text = (Buffer.isBuffer(data) ? data.toString() : data);
@@ -467,10 +453,6 @@ class RtiProxyPlatform {
       this.broadcastConnectionStatus();
       
       // Clean up intervals
-      if (this.keepAliveInterval) {
-        clearInterval(this.keepAliveInterval);
-        this.keepAliveInterval = null;
-      }
       if (this.healthMonitorInterval) {
         clearInterval(this.healthMonitorInterval);
         this.healthMonitorInterval = null;
