@@ -31,7 +31,7 @@ class RtiProxyPlatform {
     this.homebridgeConnected = false; // Track connection state
     this.lastMessageTime = null; // Track the time of the last message from Homebridge
     this.isReconnecting = false; // Track reconnection state to prevent loops
-    this.isReconnecting = false; // Prevent multiple concurrent reconnection attempts
+    this.lastAccessoriesDataString = null; // Track last processed accessories data to prevent duplicates
     this.httpServer = null; // Track the HTTP server instance
 
     // Start HTTP endpoint for accessory list
@@ -141,6 +141,11 @@ class RtiProxyPlatform {
       return;
     }
     
+    // Reset state for new connection
+    this.isReconnecting = false;
+    this.homebridgeConnected = false;
+    this.lastAccessoriesDataString = null;
+    
     // Close existing WebSocket if any
     if (this.homebridge_ws) {
       try {
@@ -170,11 +175,13 @@ class RtiProxyPlatform {
       // Notify all RTI clients of connection status
       this.broadcastConnectionStatus();
       
+      this.log('[Socket.IO Send] 40/accessories,');
       this.homebridge_ws.send('40/accessories,');
       
       // Initial accessories request
       setTimeout(() => {
         if (this.homebridge_ws.readyState === WebSocket.OPEN) {
+          this.log('[Socket.IO Send] 42/accessories,["get-accessories"]');
           this.homebridge_ws.send('42/accessories,["get-accessories"]');
         }
       }, 250);
@@ -183,6 +190,7 @@ class RtiProxyPlatform {
       this.keepAliveInterval = setInterval(() => {
         if (this.homebridge_ws && this.homebridge_ws.readyState === WebSocket.OPEN) {
           // Send lightweight ping instead of full accessories request
+          this.log('[Socket.IO Send] 2 (ping)');
           this.homebridge_ws.send('2'); // Socket.IO ping
         } else {
           if (this.keepAliveInterval) {
@@ -190,7 +198,7 @@ class RtiProxyPlatform {
             this.keepAliveInterval = null;
           }
         }
-      }, 120000); // Every 2 minutes instead of 30 seconds
+      }, 120000); // Every 2 minutes
     });
 
     this.homebridge_ws.on('message', (data) => {
@@ -212,11 +220,13 @@ class RtiProxyPlatform {
       this.updateLastMessageTime();
 
       if (text === '2') {
+        this.log('[Socket.IO Send] 3 (pong)');
         this.homebridge_ws.send('3');
         return;
       }
       if (text === '40') {
         // Acknowledge connection to accessories namespace
+        this.log('[Socket.IO Send] 40/accessories,');
         this.homebridge_ws.send('40/accessories,');
         return;
       }
@@ -233,9 +243,21 @@ class RtiProxyPlatform {
             }
             
             // Check if this is a full data load or incremental update
-            const isFullDataLoad = eventData.length > 5 || this.accessoryList.length === 0;
+            // Full data load: large dataset OR no existing data OR after reconnection
+            const isFullDataLoad = eventData.length > 5 || 
+                                  !this.accessoryList || 
+                                  this.accessoryList.length === 0 ||
+                                  !this.lastAccessoriesData;
             
             if (isFullDataLoad) {
+              // Only process if data has actually changed
+              const dataString = JSON.stringify(eventData);
+              if (this.lastAccessoriesDataString === dataString) {
+                // Data hasn't changed, skip processing
+                return;
+              }
+              this.lastAccessoriesDataString = dataString;
+              
               // Full data load - update everything but don't send incremental updates
               this.log('Processing full accessories data load, count:', eventData.length);
               this.accessoryList = eventData;
@@ -380,7 +402,7 @@ class RtiProxyPlatform {
           this.clients = this.clients.filter(c => c !== ws);
           this.log('RTI/Web client disconnected');
         });
-        ws.on('message', msg => {
+        ws.on('message', async (msg) => {
           try {
             let msgType = typeof msg;
             let msgContent = msg;
@@ -396,7 +418,7 @@ class RtiProxyPlatform {
             }
             
             // Process user-friendly commands
-            const commandResult = this.processUserCommand(msgContent);
+            const commandResult = await this.processUserCommand(msgContent);
             
             if (commandResult.isUserCommand) {
               if (commandResult.error) {
@@ -423,6 +445,7 @@ class RtiProxyPlatform {
                 }
                 
                 // Send translated command to Homebridge
+                this.log('[Socket.IO Send] Command:', commandResult.homebridgeCommand);
                 this.homebridge_ws.send(commandResult.homebridgeCommand);
                 
                 // Send success response back to client
@@ -448,6 +471,7 @@ class RtiProxyPlatform {
               
               // Forward original command (raw Socket.IO format)
               this.log('Forwarding raw command from RTI/Web client to Homebridge:', msgContent);
+              this.log('[Socket.IO Send] Raw command:', commandResult.originalCommand);
               this.homebridge_ws.send(commandResult.originalCommand);
             }
           } catch (err) {
@@ -708,6 +732,11 @@ class RtiProxyPlatform {
       // Build Homebridge Socket.IO command
       const homebridgeCommand = `42/accessories,["set-characteristics",[{"aid":${charInfo.aid},"iid":${charInfo.iid},"value":${JSON.stringify(finalValue)}}]]`;
       
+      this.log('Command translation details:');
+      this.log('  Input:', { uniqueId: uniqueId.substring(0, 8) + '...', characteristic, value });
+      this.log('  Mapped to:', { aid: charInfo.aid, iid: charInfo.iid, finalValue });
+      this.log('  Socket.IO command:', homebridgeCommand);
+      
       return { success: true, command: homebridgeCommand };
     } catch (error) {
       return { success: false, error: error.message };
@@ -765,7 +794,7 @@ class RtiProxyPlatform {
   }
 
   // Process user-friendly commands
-  processUserCommand(msgContent) {
+  async processUserCommand(msgContent) {
     try {
       const command = JSON.parse(msgContent);
       
@@ -782,7 +811,7 @@ class RtiProxyPlatform {
       }
       // Handle toggle commands
       else if (command.command === 'toggle-characteristic') {
-        const translation = this.handleToggleCommand(command);
+        const translation = await this.handleToggleCommand(command);
         if (translation.success) {
           this.log('Toggle command translated successfully:', command.uniqueId?.substring(0, 8) + '...', command.characteristic);
           return { isUserCommand: true, homebridgeCommand: translation.command };
@@ -829,6 +858,7 @@ class RtiProxyPlatform {
       if (this.homebridgeConnected && this.homebridge_ws.readyState === WebSocket.OPEN) {
         try {
           // Send a ping to verify connection
+          this.log('[Socket.IO Send] 2 (health check ping)');
           this.homebridge_ws.send('2');
         } catch (err) {
           this.log('Health check: Failed to send ping, connection may be dead');
