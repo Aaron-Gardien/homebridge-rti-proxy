@@ -200,7 +200,12 @@ class RtiProxyPlatform {
       
       // Only log non-heartbeat messages to reduce noise
       if (text !== '2' && text !== '3') {
-        this.log('[HomebridgeWS]', text);
+        // Truncate long JSON messages for readability
+        let logText = text;
+        if (text.length > 200) {
+          logText = text.substring(0, 200) + '...[truncated ' + (text.length - 200) + ' chars]';
+        }
+        this.log('[HomebridgeWS]', logText);
       }
 
       // Track the time of the last message
@@ -232,7 +237,7 @@ class RtiProxyPlatform {
             
             if (isFullDataLoad) {
               // Full data load - update everything but don't send incremental updates
-              this.log('Stored full accessories list, count:', eventData.length);
+              this.log('Processing full accessories data load, count:', eventData.length);
               this.accessoryList = eventData;
               this.lastAccessoriesData = this.accessoryList;
               
@@ -255,6 +260,7 @@ class RtiProxyPlatform {
               
             } else {
               // Incremental update - detect changes and send efficient updates
+              this.log('Processing incremental accessories update, count:', eventData.length);
               const { changes, allAccessories } = this.processAccessoryData(eventData);
               
               // Update the accessory list for the HTTP endpoint
@@ -394,6 +400,7 @@ class RtiProxyPlatform {
             
             if (commandResult.isUserCommand) {
               if (commandResult.error) {
+                this.log('User command error:', commandResult.error);
                 // Send error response back to client
                 ws.send(JSON.stringify({
                   event: "command-error",
@@ -416,7 +423,6 @@ class RtiProxyPlatform {
                 }
                 
                 // Send translated command to Homebridge
-                this.log('Translated user command to Homebridge format:', commandResult.homebridgeCommand);
                 this.homebridge_ws.send(commandResult.homebridgeCommand);
                 
                 // Send success response back to client
@@ -647,6 +653,8 @@ class RtiProxyPlatform {
         this.characteristicLookup.set(accessory.uniqueId, charMap);
       }
     }
+    
+    this.log('Built accessory lookups:', this.characteristicLookup.size, 'accessories with command translation support');
   }
 
   // Translate user-friendly command to Homebridge Socket.IO format
@@ -660,11 +668,13 @@ class RtiProxyPlatform {
       
       const charMap = this.characteristicLookup.get(uniqueId);
       if (!charMap) {
+        this.log('Command translation error: Accessory not found. Available uniqueIds:', Array.from(this.characteristicLookup.keys()).length);
         throw new Error(`Accessory with uniqueId '${uniqueId}' not found`);
       }
       
       const charInfo = charMap.get(characteristic);
       if (!charInfo) {
+        this.log('Command translation error: Characteristic not found. Available for', uniqueId.substring(0, 8) + '...:', Array.from(charMap.keys()));
         throw new Error(`Characteristic '${characteristic}' not found for accessory '${uniqueId}'`);
       }
       
@@ -763,6 +773,7 @@ class RtiProxyPlatform {
       if (command.command === 'set-characteristic') {
         const translation = this.translateCommand(command);
         if (translation.success) {
+          this.log('Command translated successfully:', command.uniqueId?.substring(0, 8) + '...', command.characteristic, '=', command.value);
           return { isUserCommand: true, homebridgeCommand: translation.command };
         } else {
           this.log('Command translation failed:', translation.error);
@@ -773,6 +784,7 @@ class RtiProxyPlatform {
       else if (command.command === 'toggle-characteristic') {
         const translation = this.handleToggleCommand(command);
         if (translation.success) {
+          this.log('Toggle command translated successfully:', command.uniqueId?.substring(0, 8) + '...', command.characteristic);
           return { isUserCommand: true, homebridgeCommand: translation.command };
         } else {
           this.log('Toggle command translation failed:', translation.error);
