@@ -380,6 +380,9 @@ class RtiProxyPlatform {
       // Track the time of the last message
       this.updateLastMessageTime();
 
+      // Debug: Log all message types for debugging
+      this.log('[DEBUG] Message type check:', { text, textType: typeof text, textLength: text.length });
+
       if (text === '2') {
         this.log('[Socket.IO Receive] Ping received');
         this.log('[Socket.IO Send] 3 (pong)');

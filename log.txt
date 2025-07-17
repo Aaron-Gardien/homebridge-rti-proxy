@@ -1,0 +1,4 @@
+[7/17/2025, 2:32:26 PM] [homebridge-rti-proxy] Socket.IO command: 42/accessories,["accessory-control",{"set":{"uniqueId":"4e50d2d83cef318a2fc6ef49f743a5946af5c641b5804c5070f6390ae8a0d0a9","aid":3,"siid":10,"iid":12,"value":false}}]
+[7/17/2025, 2:32:26 PM] [homebridge-rti-proxy] Command translated successfully: 4e50d2d8... On = 0
+[7/17/2025, 2:32:26 PM] [homebridge-rti-proxy] [Socket.IO Send] Command: 42/accessories,["accessory-control",{"set":{"uniqueId":"4e50d2d83cef318a2fc6ef49f743a5946af5c641b5804c5070f6390ae8a0d0a9","aid":3,"siid":10,"iid":12,"value":false}}]
+[7/17/2025, 2:32:30 PM] [homebridge-rti-proxy] Cleaned up expired pending command: 3-10
