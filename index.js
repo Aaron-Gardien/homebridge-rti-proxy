@@ -92,7 +92,11 @@ class RtiProxyPlatform {
           } else {
             // Track the pending command for response matching
             if (commandResult.commandInfo) {
-              const commandKey = commandResult.commandInfo.commandKey || `${commandResult.commandInfo.aid}-${commandResult.commandInfo.iid}`;
+              const commandKey = commandResult.commandInfo.commandKey || `${commandResult.commandInfo.aid}-${commandResult.commandInfo.siid}`;
+              
+              // Predict the state change before sending the command
+              this.predictStateChange(commandResult.commandInfo);
+              
               this.pendingCommands.set(commandKey, {
                 client: null, // HTTP request, no websocket client
                 timestamp: Date.now(),
@@ -145,7 +149,11 @@ class RtiProxyPlatform {
           } else {
             // Track the pending command for response matching
             if (commandResult.commandInfo) {
-              const commandKey = commandResult.commandInfo.commandKey || `${commandResult.commandInfo.aid}-${commandResult.commandInfo.iid}`;
+              const commandKey = commandResult.commandInfo.commandKey || `${commandResult.commandInfo.aid}-${commandResult.commandInfo.siid}`;
+              
+              // Predict the state change before sending the command
+              this.predictStateChange(commandResult.commandInfo);
+              
               this.pendingCommands.set(commandKey, {
                 client: null, // HTTP request, no websocket client
                 timestamp: Date.now(),
@@ -539,10 +547,19 @@ class RtiProxyPlatform {
               const accessory = eventData[0];
               const commandKey = `${accessory.aid}-${accessory.iid}`;
               
+              this.log('[DEBUG] Checking for pending command with key:', commandKey);
+              this.log('[DEBUG] Available pending commands:', Array.from(this.pendingCommands.keys()));
+              
               // Check if we have a pending command for this accessory
               if (this.pendingCommands.has(commandKey)) {
                 const pendingCommand = this.pendingCommands.get(commandKey);
                 this.log('Command response received for:', accessory.serviceName, 'aid:', accessory.aid);
+                
+                // Update our internal state immediately with the response
+                const parsed = this.parseAccessory(accessory);
+                const key = parsed.uniqueId || `${parsed.aid}-${parsed.iid}`;
+                this.accessoryStates.set(key, parsed);
+                this.parsedAccessories.set(key, parsed);
                 
                 // Log the updated characteristic values
                 if (accessory.serviceCharacteristics) {
@@ -551,20 +568,42 @@ class RtiProxyPlatform {
                   });
                 }
                 
-                // Send success response to the client who initiated the command
+                // Send success response to the RTI client who initiated the command
                 if (pendingCommand.client && pendingCommand.client.readyState === WebSocket.OPEN) {
-                  pendingCommand.client.send(JSON.stringify({
+                  // Send the updated state directly to the RTI client
+                  const commandResponse = {
                     event: "command-success",
                     message: "Command executed successfully",
                     accessory: accessory.serviceName,
-                    aid: accessory.aid
-                  }));
+                    aid: accessory.aid,
+                    updatedState: {
+                      uniqueId: accessory.uniqueId,
+                      serviceName: accessory.serviceName,
+                      characteristics: {}
+                    }
+                  };
+                  
+                  // Include the updated characteristic values
+                  if (accessory.serviceCharacteristics) {
+                    accessory.serviceCharacteristics.forEach(char => {
+                      commandResponse.updatedState.characteristics[char.type] = char.value;
+                    });
+                  }
+                  
+                  pendingCommand.client.send(JSON.stringify(commandResponse));
+                  this.log('Sent command success response to RTI client');
                 }
                 
                 // Remove the pending command
                 this.pendingCommands.delete(commandKey);
                 
-                // Continue to handle as accessories-data below
+                // Update the accessory list for HTTP endpoints
+                this.mergeAccessoryData(eventData);
+                this.buildAccessoryLookups();
+                
+                // DO NOT process this as a regular state change since it's a command response
+                // This prevents the duplicate/conflicting state update issue
+                return;
               } else {
                 this.log('State update received for:', accessory.serviceName, 'aid:', accessory.aid, '(not a command response)');
                 this.log('[DEBUG] Available pending commands:', Array.from(this.pendingCommands.keys()));
@@ -826,6 +865,10 @@ class RtiProxyPlatform {
                 // Track the pending command for response matching
                 if (commandResult.commandInfo) {
                   const commandKey = commandResult.commandInfo.commandKey || `${commandResult.commandInfo.aid}-${commandResult.commandInfo.iid}`;
+                  
+                  // Predict the state change before sending the command
+                  this.predictStateChange(commandResult.commandInfo);
+                  
                   this.pendingCommands.set(commandKey, {
                     client: ws,
                     timestamp: Date.now(),
@@ -1167,7 +1210,7 @@ class RtiProxyPlatform {
           uniqueId: uniqueId,
           characteristic: characteristic,
           value: finalValue,
-          commandKey: `${charInfo.aid}-${charInfo.iid}` // Use aid-iid for legacy format
+          commandKey: `${charInfo.aid}-${charInfo.siid}` // Use aid-siid for response matching
         }
       };
     } catch (error) {
@@ -1271,6 +1314,38 @@ class RtiProxyPlatform {
       // Not JSON or not a user command, pass through as-is
       this.log('Failed to parse as JSON, passing through as-is:', e.message);
       return { isUserCommand: false, originalCommand: msgContent };
+    }
+  }
+
+  // Predict state change when RTI sends a command to prevent duplicate updates
+  predictStateChange(commandInfo) {
+    try {
+      const { uniqueId, characteristic, value } = commandInfo;
+      
+      // Find the current accessory state
+      const currentAccessory = this.parsedAccessories.get(uniqueId);
+      if (!currentAccessory) {
+        this.log('[DEBUG] Cannot predict state change - accessory not found:', uniqueId);
+        return;
+      }
+      
+      // Create a copy of the current state
+      const predictedState = JSON.parse(JSON.stringify(currentAccessory));
+      
+      // Update the specific characteristic with the predicted value
+      if (predictedState.characteristics[characteristic]) {
+        predictedState.characteristics[characteristic].value = value;
+        
+        // Update our internal state immediately
+        this.parsedAccessories.set(uniqueId, predictedState);
+        this.accessoryStates.set(uniqueId, predictedState);
+        
+        this.log('[DEBUG] Predicted state change:', uniqueId.substring(0, 8) + '...', characteristic, '=', value);
+      } else {
+        this.log('[DEBUG] Cannot predict state change - characteristic not found:', characteristic);
+      }
+    } catch (error) {
+      this.log('[DEBUG] Error predicting state change:', error.message);
     }
   }
 
