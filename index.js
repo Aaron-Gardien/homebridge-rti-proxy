@@ -33,6 +33,7 @@ class RtiProxyPlatform {
     this.isReconnecting = false; // Track reconnection state to prevent loops
     this.lastAccessoriesDataString = null; // Track last processed accessories data to prevent duplicates
     this.httpServer = null; // Track the HTTP server instance
+    this.pendingCommands = new Map(); // Track pending commands by aid/iid for response matching
 
     // Start HTTP endpoint for accessory list
     this.setupHttpEndpoint();
@@ -89,6 +90,16 @@ class RtiProxyPlatform {
           if (commandResult.error) {
             return res.status(400).json({ error: commandResult.error });
           } else {
+            // Track the pending command for response matching
+            if (commandResult.commandInfo) {
+              const commandKey = `${commandResult.commandInfo.aid}-${commandResult.commandInfo.siid}`;
+              this.pendingCommands.set(commandKey, {
+                client: null, // HTTP request, no websocket client
+                timestamp: Date.now(),
+                command: commandResult.homebridgeCommand
+              });
+            }
+            
             // Send translated command to Homebridge
             this.log('[Socket.IO Send] Test Command:', commandResult.homebridgeCommand);
             this.homebridge_ws.send(commandResult.homebridgeCommand);
@@ -131,6 +142,16 @@ class RtiProxyPlatform {
           if (commandResult.error) {
             return res.status(400).json({ error: commandResult.error });
           } else {
+            // Track the pending command for response matching
+            if (commandResult.commandInfo) {
+              const commandKey = `${commandResult.commandInfo.aid}-${commandResult.commandInfo.siid}`;
+              this.pendingCommands.set(commandKey, {
+                client: null, // HTTP request, no websocket client
+                timestamp: Date.now(),
+                command: commandResult.homebridgeCommand
+              });
+            }
+            
             // Send translated command to Homebridge
             this.log('[Socket.IO Send] Test Toggle Command:', commandResult.homebridgeCommand);
             this.homebridge_ws.send(commandResult.homebridgeCommand);
@@ -178,6 +199,22 @@ class RtiProxyPlatform {
         accessories: debugInfo,
         lookupSize: this.characteristicLookup.size
       });
+    });
+
+    // Test connection endpoint
+    app.get('/test-connection', (req, res) => {
+      const connectionInfo = {
+        homebridgeConnected: this.homebridgeConnected,
+        websocketReady: this.homebridge_ws ? this.homebridge_ws.readyState === WebSocket.OPEN : false,
+        websocketState: this.homebridge_ws ? this.homebridge_ws.readyState : 'none',
+        lastMessageTime: this.lastMessageTime,
+        timeSinceLastMessage: this.lastMessageTime ? Date.now() - this.lastMessageTime : null,
+        clientCount: this.clients.length,
+        accessoryCount: this.accessoryList.length,
+        lookupSize: this.characteristicLookup.size
+      };
+      
+      res.json(connectionInfo);
     });
 
     // HTML table endpoint
@@ -362,8 +399,17 @@ class RtiProxyPlatform {
           const event = payload[0];
           const eventData = payload[1];
           
-          // Log all events for debugging
-          this.log('Socket.IO Event:', event, 'Data length:', eventData ? eventData.length : 'null');
+          // Log all events for debugging with more detail
+          if (event === "accessories-data") {
+            this.log('Socket.IO Event:', event, 'Data count:', eventData ? eventData.length : 'null');
+            if (eventData && eventData.length > 0) {
+              eventData.forEach((acc, index) => {
+                this.log(`  Accessory ${index + 1}:`, acc.serviceName, 'aid:', acc.aid, 'uniqueId:', acc.uniqueId?.substring(0, 8) + '...');
+              });
+            }
+          } else {
+            this.log('Socket.IO Event:', event, 'Data length:', eventData ? eventData.length : 'null');
+          }
           
           // Handle both set-characteristics-response and accessory-control-response
           if (event === "set-characteristics-response" || event === "accessory-control-response") {
@@ -378,6 +424,46 @@ class RtiProxyPlatform {
               });
             }
             return;
+          }
+          
+          // Handle command success responses that come back as accessories-data
+          // When we send accessory-control, the response is the updated state data
+          if (event === "accessories-data" && eventData && eventData.length > 0) {
+            // Check if this looks like a command response (single accessory update)
+            if (eventData.length === 1 && eventData[0].aid && eventData[0].serviceCharacteristics) {
+              const accessory = eventData[0];
+              const commandKey = `${accessory.aid}-${accessory.iid}`;
+              
+              // Check if we have a pending command for this accessory
+              if (this.pendingCommands.has(commandKey)) {
+                const pendingCommand = this.pendingCommands.get(commandKey);
+                this.log('Command response received for:', accessory.serviceName, 'aid:', accessory.aid);
+                
+                // Log the updated characteristic values
+                if (accessory.serviceCharacteristics) {
+                  accessory.serviceCharacteristics.forEach(char => {
+                    this.log('Updated characteristic:', char.type, '=', char.value);
+                  });
+                }
+                
+                // Send success response to the client who initiated the command
+                if (pendingCommand.client && pendingCommand.client.readyState === WebSocket.OPEN) {
+                  pendingCommand.client.send(JSON.stringify({
+                    event: "command-success",
+                    message: "Command executed successfully",
+                    accessory: accessory.serviceName,
+                    aid: accessory.aid
+                  }));
+                }
+                
+                // Remove the pending command
+                this.pendingCommands.delete(commandKey);
+                
+                // Continue to handle as accessories-data below
+              } else {
+                this.log('State update received for:', accessory.serviceName, 'aid:', accessory.aid, '(not a command response)');
+              }
+            }
           }
           
           if (event === "accessories-data") {
@@ -626,12 +712,31 @@ class RtiProxyPlatform {
                 
                 // Send translated command to Homebridge
                 this.log('[Socket.IO Send] Command:', commandResult.homebridgeCommand);
+                
+                // Track the pending command for response matching
+                if (commandResult.commandInfo) {
+                  const commandKey = `${commandResult.commandInfo.aid}-${commandResult.commandInfo.siid}`;
+                  this.pendingCommands.set(commandKey, {
+                    client: ws,
+                    timestamp: Date.now(),
+                    command: commandResult.homebridgeCommand
+                  });
+                  
+                  // Clean up old pending commands after 10 seconds
+                  setTimeout(() => {
+                    if (this.pendingCommands.has(commandKey)) {
+                      this.pendingCommands.delete(commandKey);
+                      this.log('Cleaned up expired pending command:', commandKey);
+                    }
+                  }, 10000);
+                }
+                
                 this.homebridge_ws.send(commandResult.homebridgeCommand);
                 
                 // Send success response back to client
                 ws.send(JSON.stringify({
-                  event: "command-success",
-                  message: "Command sent successfully"
+                  event: "command-sent",
+                  message: "Command sent to Homebridge, awaiting response..."
                 }));
               }
             } else {
@@ -927,7 +1032,18 @@ class RtiProxyPlatform {
       this.log('  Mapped to:', { aid: charInfo.aid, siid: charInfo.siid, iid: charInfo.iid, finalValue });
       this.log('  Socket.IO command:', homebridgeCommand);
       
-      return { success: true, command: homebridgeCommand };
+      return { 
+        success: true, 
+        command: homebridgeCommand,
+        commandInfo: {
+          aid: charInfo.aid,
+          siid: charInfo.siid,
+          iid: charInfo.iid,
+          uniqueId: uniqueId,
+          characteristic: characteristic,
+          value: finalValue
+        }
+      };
     } catch (error) {
       return { success: false, error: error.message };
     }
@@ -995,7 +1111,11 @@ class RtiProxyPlatform {
         const translation = this.translateCommand(command);
         if (translation.success) {
           this.log('Command translated successfully:', command.uniqueId?.substring(0, 8) + '...', command.characteristic, '=', command.value);
-          return { isUserCommand: true, homebridgeCommand: translation.command };
+          return { 
+            isUserCommand: true, 
+            homebridgeCommand: translation.command,
+            commandInfo: translation.commandInfo
+          };
         } else {
           this.log('Command translation failed:', translation.error);
           return { isUserCommand: true, error: translation.error };
@@ -1007,7 +1127,11 @@ class RtiProxyPlatform {
         const translation = await this.handleToggleCommand(command);
         if (translation.success) {
           this.log('Toggle command translated successfully:', command.uniqueId?.substring(0, 8) + '...', command.characteristic);
-          return { isUserCommand: true, homebridgeCommand: translation.command };
+          return { 
+            isUserCommand: true, 
+            homebridgeCommand: translation.command,
+            commandInfo: translation.commandInfo
+          };
         } else {
           this.log('Toggle command translation failed:', translation.error);
           return { isUserCommand: true, error: translation.error };
