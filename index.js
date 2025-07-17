@@ -273,6 +273,7 @@ class RtiProxyPlatform {
     await this.getBearerToken();
     const wsPath = `/socket.io/?token=${this.access_token}&EIO=4&transport=websocket`;
     const homebridgeURL = `ws://${this.homebridgeHost}:${this.homebridgePort}${wsPath}`;
+    this.log('Attempting WebSocket connection to:', homebridgeURL);
     this.homebridge_ws = new WebSocket(homebridgeURL);
 
     // Clear any existing intervals
@@ -280,8 +281,25 @@ class RtiProxyPlatform {
       clearTimeout(this.reconnectTimeout);
     }
 
+    // Add connection timeout
+    const connectionTimeout = setTimeout(() => {
+      if (this.homebridge_ws && this.homebridge_ws.readyState === WebSocket.CONNECTING) {
+        this.log('WebSocket connection timeout - terminating');
+        this.homebridge_ws.terminate();
+      }
+    }, 10000); // 10 second timeout
+
     this.homebridge_ws.on('open', () => {
       this.log('Connected to Homebridge Socket.IO');
+      this.log('WebSocket readyState:', this.homebridge_ws.readyState);
+      this.log('WebSocket protocol:', this.homebridge_ws.protocol);
+      this.log('WebSocket extensions:', this.homebridge_ws.extensions);
+      
+      // Clear connection timeout
+      if (connectionTimeout) {
+        clearTimeout(connectionTimeout);
+      }
+      
       this.homebridgeConnected = true;
       this.updateLastMessageTime();
       this.startConnectionHealthMonitoring(); // Start health monitoring
@@ -297,6 +315,8 @@ class RtiProxyPlatform {
         if (this.homebridge_ws.readyState === WebSocket.OPEN) {
           this.log('[Socket.IO Send] 42/accessories,["get-accessories"]');
           this.homebridge_ws.send('42/accessories,["get-accessories"]');
+        } else {
+          this.log('WebSocket not open when trying to send get-accessories, readyState:', this.homebridge_ws.readyState);
         }
       }, 250);
 
@@ -308,6 +328,7 @@ class RtiProxyPlatform {
       this.updateLastMessageTime(); // Track message receipt for health monitoring
       
       let text = (Buffer.isBuffer(data) ? data.toString() : data);
+      this.log('[Socket.IO Receive] Raw message:', text.substring(0, 100) + (text.length > 100 ? '...' : ''));
       
       // Only log non-heartbeat messages to reduce noise
       if (text !== '2' && text !== '3') {
@@ -323,11 +344,13 @@ class RtiProxyPlatform {
       this.updateLastMessageTime();
 
       if (text === '2') {
+        this.log('[Socket.IO Receive] Ping received');
         this.log('[Socket.IO Send] 3 (pong)');
         this.homebridge_ws.send('3');
         return;
       }
       if (text === '40') {
+        this.log('[Socket.IO Receive] 40 received');
         // Acknowledge connection to accessories namespace
         this.log('[Socket.IO Send] 40/accessories,');
         this.homebridge_ws.send('40/accessories,');
@@ -496,6 +519,15 @@ class RtiProxyPlatform {
     });
     this.homebridge_ws.on('error', (err) => {
       this.log('Homebridge WS error:', err.message);
+      this.log('Error code:', err.code);
+      this.log('Error type:', err.type);
+      this.log('WebSocket readyState:', this.homebridge_ws ? this.homebridge_ws.readyState : 'undefined');
+      
+      // Clear connection timeout
+      if (connectionTimeout) {
+        clearTimeout(connectionTimeout);
+      }
+      
       this.homebridgeConnected = false;
       
       // Clean up connection and trigger reconnection
