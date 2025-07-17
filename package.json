@@ -1,6 +1,6 @@
 {
   "name": "homebridge-rti-proxy",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "A Homebridge plugin that relays accessories-data as JSON to RTI and other websocket clients.",
   "main": "index.js",
   "keywords": ["homebridge-plugin", "rti", "websocket", "homebridge"],
