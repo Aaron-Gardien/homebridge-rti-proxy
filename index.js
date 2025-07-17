@@ -201,6 +201,78 @@ class RtiProxyPlatform {
       });
     });
 
+    // Test accessories request endpoint
+    app.post('/test-accessories-request', (req, res) => {
+      if (!this.homebridgeConnected) {
+        return res.status(503).json({ error: 'Homebridge not connected' });
+      }
+      
+      this.log('Manual accessories request triggered via HTTP');
+      
+      if (this.homebridge_ws.readyState === WebSocket.OPEN) {
+        this.log('[Socket.IO Send] Manual get-accessories request');
+        this.homebridge_ws.send('42/accessories,["get-accessories"]');
+        
+        return res.json({ 
+          message: 'Accessories request sent',
+          timestamp: new Date().toISOString()
+        });
+      } else {
+        return res.status(503).json({ 
+          error: 'WebSocket not ready',
+          readyState: this.homebridge_ws ? this.homebridge_ws.readyState : 'undefined'
+        });
+      }
+    });
+
+    // Test legacy command format endpoint
+    app.post('/test-legacy-command', async (req, res) => {
+      if (!this.homebridgeConnected) {
+        return res.status(503).json({ error: 'Homebridge not connected' });
+      }
+      
+      // Test with legacy set-characteristics format
+      const legacyCommand = `42/accessories,["set-characteristics",[{"aid":3,"iid":12,"value":false}]]`;
+      
+      this.log('Test legacy command triggered via HTTP');
+      this.log('[Socket.IO Send] Legacy Command:', legacyCommand);
+      
+      try {
+        this.homebridge_ws.send(legacyCommand);
+        
+        return res.json({ 
+          message: 'Legacy command sent successfully',
+          command: legacyCommand
+        });
+      } catch (error) {
+        this.log('Legacy command error:', error.message);
+        return res.status(500).json({ error: 'Legacy command failed: ' + error.message });
+      }
+    });
+
+    // Debug pending commands endpoint
+    app.get('/debug/pending', (req, res) => {
+      const pendingInfo = {
+        pendingCount: this.pendingCommands.size,
+        pending: Array.from(this.pendingCommands.entries()).map(([key, value]) => ({
+          commandKey: key,
+          timestamp: new Date(value.timestamp).toISOString(),
+          ageMs: Date.now() - value.timestamp,
+          hasClient: !!value.client,
+          commandInfo: value.commandInfo
+        })),
+        connectionState: {
+          homebridgeConnected: this.homebridgeConnected,
+          websocketReady: this.homebridge_ws ? this.homebridge_ws.readyState === WebSocket.OPEN : false,
+          websocketState: this.homebridge_ws ? this.homebridge_ws.readyState : 'none',
+          lastMessageTime: this.lastMessageTime,
+          timeSinceLastMessage: this.lastMessageTime ? Date.now() - this.lastMessageTime : null
+        }
+      };
+      
+      res.json(pendingInfo);
+    });
+
     // Test connection endpoint
     app.get('/test-connection', (req, res) => {
       const connectionInfo = {
@@ -396,11 +468,23 @@ class RtiProxyPlatform {
         this.homebridge_ws.send('40/accessories,');
         return;
       }
+      
+      // Log ALL non-ping messages for debugging
+      if (text !== '2' && text !== '3') {
+        this.log('[DEBUG] Non-ping message received:', text.substring(0, 200));
+      }
+      
       if (text.startsWith('42/accessories,')) {
+        this.log('[DEBUG] Parsing 42/accessories message, length:', text.length);
         try {
-          const payload = JSON.parse(text.slice('42/accessories,'.length));
+          const jsonPart = text.slice('42/accessories,'.length);
+          this.log('[DEBUG] JSON part to parse:', jsonPart.substring(0, 100) + (jsonPart.length > 100 ? '...' : ''));
+          
+          const payload = JSON.parse(jsonPart);
           const event = payload[0];
           const eventData = payload[1];
+          
+          this.log('[DEBUG] Parsed payload - event:', event, 'hasData:', !!eventData, 'dataType:', typeof eventData);
           
           // Log all events for debugging with more detail
           if (event === "accessories-data") {
@@ -585,7 +669,11 @@ class RtiProxyPlatform {
           }
         } catch (err) {
           this.log('Failed to parse frame:', err.message, text);
+          this.log('[DEBUG] Parse error details:', err);
         }
+      } else if (text !== '2' && text !== '3' && text !== '40') {
+        // Log any other unexpected message types
+        this.log('[DEBUG] Unexpected message format received:', text.substring(0, 100));
       }
     });
 
@@ -722,18 +810,32 @@ class RtiProxyPlatform {
                   this.pendingCommands.set(commandKey, {
                     client: ws,
                     timestamp: Date.now(),
-                    command: commandResult.homebridgeCommand
+                    command: commandResult.homebridgeCommand,
+                    commandInfo: commandResult.commandInfo
                   });
+                  
+                  this.log('[DEBUG] Tracking pending command:', commandKey, 'for response matching');
                   
                   // Clean up old pending commands after 10 seconds
                   setTimeout(() => {
                     if (this.pendingCommands.has(commandKey)) {
+                      this.log('[DEBUG] Command timeout - no response received for:', commandKey);
                       this.pendingCommands.delete(commandKey);
                       this.log('Cleaned up expired pending command:', commandKey);
+                      
+                      // Send timeout response to client
+                      if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({
+                          event: "command-timeout",
+                          message: "No response received from Homebridge within 10 seconds",
+                          commandKey: commandKey
+                        }));
+                      }
                     }
                   }, 10000);
                 }
                 
+                this.log('[DEBUG] Sending command to Homebridge, WebSocket state:', this.homebridge_ws.readyState);
                 this.homebridge_ws.send(commandResult.homebridgeCommand);
                 
                 // Send success response back to client
