@@ -92,11 +92,12 @@ class RtiProxyPlatform {
           } else {
             // Track the pending command for response matching
             if (commandResult.commandInfo) {
-              const commandKey = `${commandResult.commandInfo.aid}-${commandResult.commandInfo.siid}`;
+              const commandKey = commandResult.commandInfo.commandKey || `${commandResult.commandInfo.aid}-${commandResult.commandInfo.iid}`;
               this.pendingCommands.set(commandKey, {
                 client: null, // HTTP request, no websocket client
                 timestamp: Date.now(),
-                command: commandResult.homebridgeCommand
+                command: commandResult.homebridgeCommand,
+                commandInfo: commandResult.commandInfo
               });
             }
             
@@ -144,11 +145,12 @@ class RtiProxyPlatform {
           } else {
             // Track the pending command for response matching
             if (commandResult.commandInfo) {
-              const commandKey = `${commandResult.commandInfo.aid}-${commandResult.commandInfo.siid}`;
+              const commandKey = commandResult.commandInfo.commandKey || `${commandResult.commandInfo.aid}-${commandResult.commandInfo.iid}`;
               this.pendingCommands.set(commandKey, {
                 client: null, // HTTP request, no websocket client
                 timestamp: Date.now(),
-                command: commandResult.homebridgeCommand
+                command: commandResult.homebridgeCommand,
+                commandInfo: commandResult.commandInfo
               });
             }
             
@@ -198,6 +200,22 @@ class RtiProxyPlatform {
         count: debugInfo.length,
         accessories: debugInfo,
         lookupSize: this.characteristicLookup.size
+      });
+    });
+
+    // Debug current code version endpoint
+    app.get('/debug/version', (req, res) => {
+      res.json({
+        message: 'RTI Proxy Debug Version Check',
+        timestamp: new Date().toISOString(),
+        features: {
+          accessoryControlFormat: true,
+          pendingCommandTracking: true,
+          enhancedLogging: true,
+          debugEndpoints: true
+        },
+        currentFormat: 'accessory-control',
+        codeVersion: '2025-07-17-enhanced-debugging'
       });
     });
 
@@ -549,6 +567,7 @@ class RtiProxyPlatform {
                 // Continue to handle as accessories-data below
               } else {
                 this.log('State update received for:', accessory.serviceName, 'aid:', accessory.aid, '(not a command response)');
+                this.log('[DEBUG] Available pending commands:', Array.from(this.pendingCommands.keys()));
               }
             }
           }
@@ -806,7 +825,7 @@ class RtiProxyPlatform {
                 
                 // Track the pending command for response matching
                 if (commandResult.commandInfo) {
-                  const commandKey = `${commandResult.commandInfo.aid}-${commandResult.commandInfo.siid}`;
+                  const commandKey = commandResult.commandInfo.commandKey || `${commandResult.commandInfo.aid}-${commandResult.commandInfo.iid}`;
                   this.pendingCommands.set(commandKey, {
                     client: ws,
                     timestamp: Date.now(),
@@ -1129,8 +1148,9 @@ class RtiProxyPlatform {
         }
       }
       
-      // Build Homebridge Socket.IO command using accessory-control format
-      const homebridgeCommand = `42/accessories,["accessory-control",{"set":{"uniqueId":"${uniqueId}","aid":${charInfo.aid},"siid":${charInfo.siid},"iid":${charInfo.iid},"value":${JSON.stringify(finalValue)}}}]`;
+      // Build Homebridge Socket.IO command using set-characteristics format for compatibility
+      // Note: Using legacy format as accessory-control might not be working
+      const homebridgeCommand = `42/accessories,["set-characteristics",[{"aid":${charInfo.aid},"iid":${charInfo.iid},"value":${JSON.stringify(finalValue)}}]]`;
       
       this.log('Command translation details:');
       this.log('  Input:', { uniqueId: uniqueId.substring(0, 8) + '...', characteristic, value });
@@ -1146,7 +1166,8 @@ class RtiProxyPlatform {
           iid: charInfo.iid,
           uniqueId: uniqueId,
           characteristic: characteristic,
-          value: finalValue
+          value: finalValue,
+          commandKey: `${charInfo.aid}-${charInfo.iid}` // Use aid-iid for legacy format
         }
       };
     } catch (error) {
@@ -1278,9 +1299,9 @@ class RtiProxyPlatform {
         return;
       }
       
-      // Don't send health check pings - they're causing disconnections
-      // The regular keep-alive pings every 2 minutes are sufficient
-    }, 300000); // Check every 5 minutes instead of 1 minute
+      // COMPLETELY DISABLE health check pings - they're causing disconnections
+      // Homebridge sends its own pings every 25 seconds, we just respond to those
+    }, 300000); // Check every 5 minutes but don't send any pings
   }
 
   // Track last message time
