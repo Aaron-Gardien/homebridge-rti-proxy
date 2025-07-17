@@ -339,9 +339,12 @@ class RtiProxyPlatform {
           const event = payload[0];
           const eventData = payload[1];
           
-          // Handle set-characteristics response
-          if (event === "set-characteristics-response") {
-            this.log('Received set-characteristics response:', payload);
+          // Log all events for debugging
+          this.log('Socket.IO Event:', event, 'Data length:', eventData ? eventData.length : 'null');
+          
+          // Handle both set-characteristics-response and accessory-control-response
+          if (event === "set-characteristics-response" || event === "accessory-control-response") {
+            this.log('Received command response:', event, payload);
             if (eventData && eventData.length > 0) {
               eventData.forEach(response => {
                 if (response.status === 0) {
@@ -438,6 +441,35 @@ class RtiProxyPlatform {
                 client.needsFullState = false;
               }
             });
+          }
+          
+          // Handle any other events that might contain state updates
+          else if (event === "accessory-update" || event === "characteristic-update") {
+            this.log('Received state update event:', event, eventData);
+            // Process as incremental update
+            if (eventData && eventData.length > 0) {
+              const { changes, allAccessories } = this.processAccessoryData(eventData);
+              
+              // Update the accessory list for the HTTP endpoint
+              this.mergeAccessoryData(eventData);
+              
+              // Build lookup maps for command translation
+              this.buildAccessoryLookups();
+              
+              // Send changes to WebSocket clients
+              if (changes.length > 0) {
+                const changeNotifications = this.createChangeNotification(changes);
+                changeNotifications.forEach(notification => {
+                  this.sendToClients(notification);
+                });
+                this.log(`Sent ${changeNotifications.length} state update messages to WebSocket clients`);
+              }
+            }
+          }
+          
+          // Log any unhandled events for debugging
+          else {
+            this.log('Unhandled Socket.IO event:', event, 'Data:', eventData ? 'present' : 'null');
           }
         } catch (err) {
           this.log('Failed to parse frame:', err.message, text);
